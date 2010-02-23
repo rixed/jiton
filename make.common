@@ -1,0 +1,19 @@
+# Common rules
+.SUFFIXES: .ml .mli .cmo .cmi .cmx .opt .byte
+
+.cmo.byte:
+	$(OCAMLC)   -o $@ -package "$(REQUIRES)" -linkpkg $(OCAMLFLAGS) $^
+
+.cmx.opt:
+	$(OCAMLOPT) -o $@ -package "$(REQUIRES)" -linkpkg $(OCAMLOPTFLAGS) $^
+
+.ml.cmo:
+	$(OCAMLC) -package "$(REQUIRES)" $(OCAMLFLAGS) -c $<
+
+.mli.cmi:
+	$(OCAMLC) -package "$(REQUIRES)" $(OCAMLFLAGS) -c $<
+
+.ml.cmx:
+	$(OCAMLOPT) -package "$(REQUIRES)" $(OCAMLOPTFLAGS) -c $<
+
+
