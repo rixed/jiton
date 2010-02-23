@@ -112,16 +112,26 @@ end
 
 module type CODEBUFFER =
 sig
-	(* You write code into segments. *)
-	type segment
+	(* You write code into buffer. *)
+	type buffer
 	type func_param
 
-	(* Open an existing segment or create a new one *)
-	val open_segment : ?size:int -> ?filename:string -> segment
-	val poke_byte : segment -> offset:int -> int -> unit
-	val close_segment : segment -> unit
-	val exec_segment : offset:int -> func_param array -> unit
-
+	(* Open an existing buffer or create a new one *)
+	val make_buffer : ?size:int -> ?filename:string -> buffer
+	val poke_byte : buffer -> offset:int -> int -> unit
+	val exec_buffer : buffer -> offset:int -> func_param array -> unit
 end
 
+module Codebuffer (Impl : IMPLEMENTER)
+	: CODEBUFFER with type func_param = Impl.word =
+struct
+	type buffer	(* Remains abstract, actually a C struct codebuf *)
+	type func_param = Impl.word
 
+	external make_buffer
+		: ?size:int -> ?filename:string -> buffer = "wrap_make_buffer"
+	external poke_byte
+		: buffer -> offset:int -> int -> unit = "wrap_poke_byte"
+	external exec_buffer
+		: buffer -> offset:int -> func_param array -> unit = "wrap_exec_buffer"
+end

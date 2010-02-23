@@ -1,8 +1,8 @@
 OCAMLC   = OCAMLPATH=../.. ocamlfind ocamlc
 OCAMLOPT = OCAMLPATH=../.. ocamlfind ocamlopt
 OCAMLDEP = OCAMLPATH=../.. ocamlfind ocamldep
-OCAMLOPTFLAGS = -S -w Ael -g
-OCAMLFLAGS    = -w Ael -g
+OCAMLOPTFLAGS = -ccopt -L.. -w Ael -g -S
+OCAMLFLAGS    = -ccopt -L.. -w Ael -g
 
 REQUIRES = jiton
 

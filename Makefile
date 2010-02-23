@@ -6,10 +6,13 @@ OCAMLDEP   = ocamlfind ocamldep
 INCS       =
 OCAMLOPTFLAGS = $(INCS) -w Ae -g
 OCAMLFLAGS    = $(INCS) -w Ae -g
+CPPFLAGS   = -I $(shell ocamlfind printconf stdlib)
 
 SOURCES  = $(wildcard *.ml)
 OBJECTS  = $(SOURCES:.ml=.cmo)
 XOBJECTS = $(OBJECTS:.cmo=.cmx)
+CSOURCES = codebuf.c wrap_codebuf.c
+CLIB     = libjithelper.a
 
 ARCHIVE  = $(NAME).cma
 XARCHIVE = $(ARCHIVE:.cma=.cmxa)
@@ -21,11 +24,14 @@ REQUIRES   = num
 all: $(ARCHIVE)
 opt: $(XARCHIVE)
 
-$(ARCHIVE): $(OBJECTS)
-	$(OCAMLC)   -a -o $@ -package "$(REQUIRES)" -linkpkg $(OCAMLFLAGS) $^
+$(CLIB): $(CSOURCES:.c=.o)
+	$(AR) r $@ $?
 
-$(XARCHIVE): $(XOBJECTS)
-	$(OCAMLOPT) -a -o $@ -package "$(REQUIRES)" $(OCAMLOPTFLAGS) $^
+$(ARCHIVE): $(OBJECTS) $(CLIB)
+	$(OCAMLC)   -a -o $@ -package "$(REQUIRES)" -linkpkg $(OCAMLFLAGS) -custom $(OBJECTS) -cclib -ljithelper
+
+$(XARCHIVE): $(XOBJECTS) $(CLIB)
+	$(OCAMLOPT) -a -o $@ -package "$(REQUIRES)" $(OCAMLOPTFLAGS) $(OBJECTS) -cclib -ljithelper
 
 install: all
 	if test -f $(XARCHIVE) ; then extra="$(XARCHIVE) "`basename $(XARCHIVE) .cmxa`.a ; fi ; \
