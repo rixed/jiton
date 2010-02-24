@@ -31,7 +31,7 @@ $(ARCHIVE): $(OBJECTS) $(CLIB)
 	$(OCAMLC)   -a -o $@ -package "$(REQUIRES)" -linkpkg $(OCAMLFLAGS) -custom $(OBJECTS) -cclib -ljithelper
 
 $(XARCHIVE): $(XOBJECTS) $(CLIB)
-	$(OCAMLOPT) -a -o $@ -package "$(REQUIRES)" $(OCAMLOPTFLAGS) $(OBJECTS) -cclib -ljithelper
+	$(OCAMLOPT) -a -o $@ -package "$(REQUIRES)" $(OCAMLOPTFLAGS) $(XOBJECTS) -cclib -ljithelper
 
 install: all
 	if test -f $(XARCHIVE) ; then extra="$(XARCHIVE) "`basename $(XARCHIVE) .cmxa`.a ; fi ; \
