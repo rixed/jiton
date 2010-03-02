@@ -299,7 +299,7 @@ struct
 						Hashtbl.add used_regs r true ;
 						r) ;
 				(* We cannot initialize in_regs for now, since we need to refer back to
-				 * previously created plan entries. So we create an dummy array here and will finish
+				 * previously created plan entries. So we create a dummy array here and will finish
 				 * initialization hereafter. *)
 				in_regs = [||] } in
 		let plan = Array.init (Array.length preplan) init_plan in
