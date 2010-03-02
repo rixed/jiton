@@ -1,5 +1,5 @@
 description = "Code generator for SIMD processing"
 version = "1"
-requires = "num"
+requires = "num bigarray"
 archive(byte) = "jiton.cma"
 archive(native) = "jiton.cmxa"

@@ -4,11 +4,12 @@ OCAMLC     = ocamlfind ocamlc
 OCAMLOPT   = ocamlfind ocamlopt
 OCAMLDEP   = ocamlfind ocamldep
 INCS       =
-OCAMLOPTFLAGS = $(INCS) -w Ae -g
-OCAMLFLAGS    = $(INCS) -w Ae -g
-CPPFLAGS   = -I $(shell ocamlfind printconf stdlib)
+override OCAMLOPTFLAGS += $(INCS) -w Ae -g
+override OCAMLFLAGS    += $(INCS) -w Ae -g
+override CFLAGS        += -ggdb -std=c99 -D_GNU_SOURCE
+override CPPFLAGS      += -I $(shell ocamlfind printconf stdlib)
 
-SOURCES  = $(wildcard *.ml)
+SOURCES  = jiton.ml codebuffer_impl.ml compiler_impl.ml $(wildcard impl_*.ml)
 OBJECTS  = $(SOURCES:.ml=.cmo)
 XOBJECTS = $(OBJECTS:.cmo=.cmx)
 CSOURCES = codebuf.c wrap_codebuf.c
@@ -17,9 +18,9 @@ CLIB     = libjithelper.a
 ARCHIVE  = $(NAME).cma
 XARCHIVE = $(ARCHIVE:.cma=.cmxa)
 
-REQUIRES   = num
+REQUIRES   = num bigarray
 
-.PHONY: clean all
+.PHONY: clean all dump
 
 all: $(ARCHIVE)
 opt: $(XARCHIVE)
@@ -49,8 +50,12 @@ check: $(ARCHIVE) $(XARCHIVE)
 clean:
 	rm -f *.cm[ioxa] *.cmxa *.a *.o *.s .depend
 
+# Just to remember the cmd line
+dump:
+	objdump -m mips:loongson_2f -b binary -M no-aliases,gpr-names=n32 -D /tmp/test.code
+
 # Dependencies
-.depend: $(wildcard *.ml)
+.depend: $(SOURCES)
 	$(OCAMLDEP) -package "$(REQUIRES)" $^ > $@
 
 include make.common

@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <assert.h>
+#include <stdint.h>
 #include <caml/mlvalues.h>
 #include <caml/memory.h>
 #include <caml/alloc.h>
@@ -69,7 +70,7 @@ static value codebuf_new(size_t length, char const *filename)
  * Wrappers to codebuf functions
  */
 
-CAMLprim value wrap_make_buffer(value size, value filename)
+CAMLprim value wrap_make_codebuf(value size, value filename)
 {
 	CAMLparam2(size, filename);
 	CAMLlocal1(buffer);
@@ -83,7 +84,7 @@ CAMLprim value wrap_make_buffer(value size, value filename)
 	CAMLreturn(buffer);
 }
 
-CAMLprim void wrap_poke_byte(value buffer, value offset, value byte)
+CAMLprim void wrap_codebuf_poke(value buffer, value offset, value byte)
 {
 	CAMLparam3(buffer, offset, byte);
 	assert(Tag_val(buffer) == Custom_tag);
@@ -95,15 +96,77 @@ CAMLprim void wrap_poke_byte(value buffer, value offset, value byte)
 	CAMLreturn0;
 }
 
-CAMLprim void wrap_exec_buffer(value buffer, value offset, value params)
+CAMLprim value wrap_codebuf_peek(value buffer, value offset)
+{
+	CAMLparam2(buffer, offset);
+	assert(Tag_val(buffer) == Custom_tag);
+	assert(Is_long(offset));
+
+	uint8_t byte = codebuf_peek(Data_custom_val(buffer), Long_val(offset));
+
+	CAMLreturn(Val_int(byte));
+}
+
+CAMLprim void wrap_codebuf_exec(value buffer, value offset, value params)
 {
 	CAMLparam3(buffer, offset, params);
 	assert(Tag_val(buffer) == Custom_tag);
 	assert(Is_long(offset));
 	assert(Is_block(params));
+	assert(Tag_val(params) == 0);
 
-	// TODO: params
-	codebuf_exec(Data_custom_val(buffer), Long_val(offset), 0, NULL);
+	assert(sizeof(value) == sizeof(intptr_t));
+	int nb_params = Wosize_val(params);
+	intptr_t native_params[nb_params];
+	for (unsigned p = 0; p < nb_params; p++) {
+		native_params[p] = Nativeint_val(Field(params, p));
+	}
+
+	codebuf_exec(Data_custom_val(buffer), Long_val(offset), nb_params, native_params);
+
+	CAMLreturn0;
+}
+
+CAMLprim value wrap_codebuf_addr(value buffer, value offset)
+{
+	CAMLparam2(buffer, offset);
+	assert(Tag_val(buffer) == Custom_tag);
+	assert(Is_long(offset));
+	
+	CAMLlocal1(val);
+	
+	struct codebuf *codebuf = Data_custom_val(buffer);
+	intptr_t res = (intptr_t)(codebuf->addr + Long_val(offset));
+	val = copy_int64(res);
+
+	CAMLreturn(val);
+}
+
+/*
+ * These are used by impl_virtual to read/wryte bigarrays by address
+ */
+
+CAMLprim value wrap_peek_byte(value addr, value offset)
+{
+	CAMLparam2(addr, offset);
+	assert(Tag_val(addr) == Custom_tag);
+	assert(Is_long(offset));
+
+	uint8_t *ptr = (uint8_t *)Nativeint_val(addr);
+
+	CAMLreturn(Val_int(ptr[Long_val(offset)]));
+}
+
+CAMLprim void wrap_poke_byte(value addr, value offset, value byte)
+{
+	CAMLparam3(addr, offset, byte);
+	assert(Tag_val(addr) == Custom_tag);
+	assert(Is_long(offset));
+	assert(Is_long(byte));
+
+	uint8_t *ptr = (uint8_t *)Nativeint_val(addr);
+
+	ptr[Long_val(offset)] = Long_val(byte);
 
 	CAMLreturn0;
 }

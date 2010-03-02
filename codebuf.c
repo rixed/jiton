@@ -8,6 +8,8 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <asm/cachectl.h>
+#include <sys/cachectl.h>
 #include "codebuf.h"
 
 static size_t filesize(int fd)
@@ -27,6 +29,7 @@ int codebuf_ctor(struct codebuf *codebuf, size_t length, char const *filename)
 
 	codebuf->addr = NULL;
 	codebuf->length = length;
+	codebuf->need_flush = true;
 
 	if (filename) {
 		fd = open(filename, O_RDWR);
@@ -39,8 +42,17 @@ int codebuf_ctor(struct codebuf *codebuf, size_t length, char const *filename)
 		} else {
 			codebuf->length = filesize(fd);
 		}
+		if (length > codebuf->length) {
+			if (0 != ftruncate(fd, length)) {
+				fprintf(stderr, "Cannot ftruncate %s : %s\n", filename, strerror(errno));
+				return -1;
+			}
+			codebuf->length = length;
+		}
 	}
 
+	fprintf(stdout, "MMapping file '%s' (fd=%d), required length=%zu, actual length=%zu\n",
+		filename, fd, length, codebuf->length);
 	void *addr = mmap(NULL, codebuf->length, PROT_EXEC|PROT_READ|PROT_WRITE,
 			(fd == -1 ? MAP_PRIVATE|MAP_ANONYMOUS : MAP_SHARED) | MAP_EXECUTABLE, fd, 0);
 
@@ -67,10 +79,74 @@ void codebuf_poke(struct codebuf *codebuf, size_t offset, int8_t value)
 {
 	assert(offset < codebuf->length);
 	codebuf->addr[offset] = value;
+	codebuf->need_flush = true;
 }
 
+uint8_t codebuf_peek(struct codebuf *codebuf, size_t offset)
+{
+	assert(offset < codebuf->length);
+	return codebuf->addr[offset];
+}
+
+static int codebuf_flush(struct codebuf *codebuf)
+{
+	printf("Flushing pages from %p\n", codebuf->addr);
+
+	if (0 != cacheflush(codebuf->addr, codebuf->length, ICACHE|DCACHE)) {
+		fprintf(stderr, "Cannot flush caches : %s\n", strerror(errno));
+		return -1;
+	}
+	codebuf->need_flush = false;
+	return 0;
+}
+
+typedef void proc0(void);
+typedef void proc1(intptr_t);
+typedef void proc2(intptr_t, intptr_t);
+typedef void proc3(intptr_t, intptr_t, intptr_t);
+typedef void proc4(intptr_t, intptr_t, intptr_t, intptr_t);
+typedef void proc5(intptr_t, intptr_t, intptr_t, intptr_t, intptr_t);
 void codebuf_exec(struct codebuf *codebuf, size_t offset, unsigned nb_params, intptr_t *params)
 {
-	void (*func)(void) = (void (*)(void))(codebuf->addr + offset);
-	func();
+	if (codebuf->need_flush) (void)codebuf_flush(codebuf);
+
+	switch (nb_params) {
+		case 0:
+			{
+				proc0 *func = (proc0 *)(codebuf->addr + offset);
+				func();
+			}
+			break;
+		case 1:
+			{
+				proc1 *func = (proc1 *)(codebuf->addr + offset);
+				func(params[0]);
+			}
+			break;
+		case 2:
+			{
+				proc2 *func = (proc2 *)(codebuf->addr + offset);
+				func(params[0], params[1]);
+			}
+			break;
+		case 3:
+			{
+				proc3 *func = (proc3 *)(codebuf->addr + offset);
+				func(params[0], params[1], params[2]);
+			}
+			break;
+		case 4:
+			{
+				proc4 *func = (proc4 *)(codebuf->addr + offset);
+				func(params[0], params[1], params[2], params[3]);
+			}
+			break;
+		case 5:
+			{
+				proc5 *func = (proc5 *)(codebuf->addr + offset);
+				func(params[0], params[1], params[2], params[3], params[4]);
+			}
+			break;
+	}
 }
+

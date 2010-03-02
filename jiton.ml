@@ -32,6 +32,8 @@ type reg_num = int
 type scale = int
 
 (* Used to specify inputs and outputs of the operations.
+ * ALSO USED FOR PASSING ACTUAL VALUES TO CODE EMITTERS !
+ * In this case, data_type is reg number, constant value or auto storage location !
  * Auto is for automatic storage (typically, stack) *)
 type spec_in =
 	| Reg of (bank_num * data_type)
@@ -40,6 +42,9 @@ type spec_in =
 
 (* Used to specify expected outputs *)
 type spec_out = data_type
+
+(* When the implementation have no preamble to emit *)
+let no_preamble _ _ = ()
 
 (*
  * An implementer provides code emitters for an architecture
@@ -51,9 +56,14 @@ sig
 	type proc
 
 	(* Word is the size of the general registers (bank 0),
-	 * auto storage and procedure parameters *)
+	 * auto storage and procedure parameters. This is not necessarily
+	 * nativeint since one may want to cross-compile. *)
 	type word
 	val word_of_int : int -> word
+
+	(* But then, if you plan to execute it we want to be able to convert
+	 * it to nativeint. *)
+	val nativeint_of_word : word -> nativeint
 	
 	(* Size of the various register banks *)
 	val register_sets : int array
@@ -67,12 +77,12 @@ sig
 		  perm : int array ;	(* number of permanently assigned registers needed *)
 		  out_banks : bank_num array ;	(* in which banks the output are assigned *)
 		  (* This code will be placed before the main loop and can be used to init perm regs *)
-		  preamble_emitter : proc -> int array (* perm regs *) -> unit ;
+		  preamble_emitter : proc -> spec_in array (* perm regs *) -> unit ;
 		  (* This code perform the operation in the main loop *)
 		  emitter : proc ->
-		  	int array (* input regs *) ->
-		  	int array (* scratch regs *) ->
-		  	int array (* output regs *) ->
+		  	spec_in array (* input regs *) ->
+		  	spec_in array (* scratch regs *) ->
+		  	spec_in array (* output regs *) ->
 		  	unit }
 	
 	(* Look for an implementation satisfying given specifications. *)
@@ -97,14 +107,19 @@ sig
 	(* Emit code to reserve and initialize some storage for extra values
 	 * Note that for auto storage of param value, no extra storage may be
 	 * needed (if procedure parameters are already on the stack) *)
-	val emit_entry_point : proc -> initer array -> unit
+	val emit_entry_point : proc -> initer array -> (spec_in, bool) Hashtbl.t -> unit
 
 	(* Emit code to exit the procedure (and clear auto storage) *)
 	val emit_exit : proc -> unit
 
-	(* Run the given procedure with these parameters *)
-	val exec : proc -> word array -> unit
+	(* Run the given procedure with these parameters.
+	 * If your parameters are bigarray, use the convertion function address_of_bigarray below. *)
+	val exec : proc -> nativeint array -> unit
 end
+
+(* This works on bigarrays as it would work on any custom tagged object which stores
+ * a pointer to its data as the first member of its structure. *)
+external address_of_bigarray : 'a -> nativeint = "%identity"
 
 (*
  * A CODEBUFFER provides a way to poke instructions, execute them, save them on a file...
@@ -112,26 +127,29 @@ end
 
 module type CODEBUFFER =
 sig
-	(* You write code into buffer. *)
-	type buffer
-	type func_param
+	type t
 
-	(* Open an existing buffer or create a new one *)
-	val make_buffer : ?size:int -> ?filename:string -> buffer
-	val poke_byte : buffer -> offset:int -> int -> unit
-	val exec_buffer : buffer -> offset:int -> func_param array -> unit
+	(* Low level interface to a mmaped executable file *)
+	val make : int -> string -> t
+	val exec : t -> int (* offset *) -> nativeint array -> unit
+
+	(* Higher level functions *)
+	val append : t -> int -> unit
+	val align : t -> int -> unit
+	val offset : t -> int
+	val patch_byte : t -> int (* offset *) -> int (* value *) -> int (* mask *) -> unit
 end
 
-module Codebuffer (Impl : IMPLEMENTER)
-	: CODEBUFFER with type func_param = Impl.word =
-struct
-	type buffer	(* Remains abstract, actually a C struct codebuf *)
-	type func_param = Impl.word
+module type COMPILER =
+sig
+	module Impl : IMPLEMENTER
+	
+	type program_step = Impl.impl_lookup * string array * (string * data_type) array
+	
+	type program = program_step array
+	
+	type program_param = string * data_type
 
-	external make_buffer
-		: ?size:int -> ?filename:string -> buffer = "wrap_make_buffer"
-	external poke_byte
-		: buffer -> offset:int -> int -> unit = "wrap_poke_byte"
-	external exec_buffer
-		: buffer -> offset:int -> func_param array -> unit = "wrap_exec_buffer"
+	val compile : program -> program_param array -> (nativeint array -> unit)
+
 end

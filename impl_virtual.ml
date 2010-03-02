@@ -43,28 +43,35 @@ let big_int_pack pack_sz vals =
 
 (* Memory *)
 
-let memory_size = 1024
-let memory = Array.make memory_size 0
+external peek_byte :
+	nativeint -> int -> int = "wrap_peek_byte"
+external poke_byte :
+	nativeint -> int -> int -> unit = "wrap_poke_byte"
 
-let memory_read_8 addr = big_int_of_int (memory.(addr) land 0xff)
-let memory_write_8 addr value =
+let memory_read_8 addr' offset =
+	let addr = nativeint_of_big_int addr' in
+	let v = peek_byte addr offset in
+	Printf.printf "mem.(%nx+%d) -> %d\n" addr offset v ;
+	big_int_of_int v
+let memory_write_8 addr' offset value =
+	let addr = nativeint_of_big_int addr' in
 	let v = (int_of_big_int value) land 0xff in
-	Printf.printf "mem.(%d) <- 0x%x\n" addr v ;
-	memory.(addr) <- v
+	Printf.printf "mem.(%nx+%d) <- %d\n" addr offset v ;
+	poke_byte addr offset v
 
-let memory_read_seq num addr =
-	let rec aux value offset =
-		if offset >= num then value
+let memory_read_seq num addr offset =
+	let rec aux value dec =
+		if dec >= num then value
 		else aux (lor_big_int value
-			(lsl_big_int (memory_read_8 (addr + offset)) (offset * 8))) (offset+1) in
+			(lsl_big_int (memory_read_8 addr (offset + dec)) (dec * 8))) (dec+1) in
 	aux zero_big_int 0
 
-let memory_write_seq num addr value =
-	let rec aux offset =
-		if offset >= num then ()
+let memory_write_seq num addr offset value =
+	let rec aux dec =
+		if dec >= num then ()
 		else (
-			memory_write_8 (addr + offset) (lsr_big_int value (offset * 8)) ;
-			aux (offset + 1)) in
+			memory_write_8 addr (offset + dec) (lsr_big_int value (dec * 8)) ;
+			aux (dec + 1)) in
 	aux 0
 
 let memory_read_16 = memory_read_seq 2
@@ -78,6 +85,7 @@ module Virtual : IMPLEMENTER =
 struct
 	type word = int32
 	let word_of_int = Int32.of_int
+	let nativeint_of_word = Nativeint.of_int32
 
 	type initer = Param of int | Const of word
 	(* loop_descr is used to remember where a loop started and where it stops *) 
@@ -88,8 +96,8 @@ struct
 		{ mutable pc : int ;	(* program counter *)
 		  mutable loops : loop_descr ;	(* used only when emitting code not when running *)
 		  mutable code_size : int ;
-		  mutable params : word array ;	(* used by load_param operation *)
-		  mutable clock_reg : int ;	(* the number of our perm register that store loop counter *)
+		  mutable params : nativeint array ;	(* used by load_param operation *)
+		  mutable clock_reg : spec_in ;	(* the number of our perm register that store loop counter *)
 		  mutable auto : word array ;	(* auto storage *)
 		  (* We use an array for code since we use index in this array as loop labels *)
 		  code : instruction array }
@@ -98,11 +106,11 @@ struct
 		{ scratch : int array ;
 		  perm : int array ;
 		  out_banks : bank_num array ;
-		  preamble_emitter : proc -> int array (* perm regs *) -> unit ;
+		  preamble_emitter : proc -> spec_in array (* perm regs *) -> unit ;
 		  emitter : proc ->
-		  	int array (* input regs *) ->
-		  	int array (* scratch regs *) ->
-		  	int array (* output regs *) ->
+		  	spec_in array (* input regs *) ->
+		  	spec_in array (* scratch regs *) ->
+		  	spec_in array (* output regs *) ->
 		  	unit }
 
 	type impl_lookup = scale * spec_in array * spec_out array -> op_impl
@@ -120,10 +128,20 @@ struct
 
 	let regs = Array.init nb_banks (fun bank -> Array.make register_sets.(bank) zero_big_int)
 
-	let reg_write ?(bank=0) r v_ =
-		let v = land_big_int v_ register_masks.(bank) in
-		Printf.printf "reg.(%d).(%d) <- %s\n" bank r (string_of_big_int v) ;
-		regs.(bank).(r) <- v
+	let reg_write reg v_ = match reg with
+		| Reg (bank, r) ->
+			let v = land_big_int v_ register_masks.(bank) in
+			Printf.printf "reg.(%d).(%d) <- %s\n" bank r (string_of_big_int v) ;
+			regs.(bank).(r) <- v
+		| _ -> failwith "Try to write in something not a register"
+	
+	let reg_read = function
+		| Reg (bank, r) -> regs.(bank).(r)
+		| _ -> failwith "Try to read from something not a register"
+	
+	let cst_read = function
+		| Cst c -> c
+		| _ -> failwith "Constant is not a constant"
 
 	let add_code proc f =
 		proc.code.(proc.code_size) <- f ;
@@ -149,105 +167,102 @@ struct
 			scratch = [||] ; perm = [||] ; out_banks = [| bank |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs -> add_code proc (fun () ->
-				reg_write outs.(0) (add_big_int regs.(0).(ins.(0)) regs.(0).(ins.(1))))) }
+				reg_write outs.(0) (add_big_int (reg_read ins.(0)) (reg_read ins.(1))))) }
 		| _ -> raise Not_found
 
 	let mul_rshift = function
-		| 1, [| Reg (bank, sz) ; Reg (bank', sz') ; Cst shift |], [| sz'' |]
+		| 1, [| Reg (bank, sz) ; Reg (bank', sz') ; Cst _ |], [| sz'' |]
 			when bank = bank' &&
 				sz = sz' && sz = sz'' &&
 				bank < nb_banks && sz <= register_sizes.(bank) -> {
 			scratch = [||] ; perm = [||] ; out_banks = [| bank |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs ->
-				assert (shift = ins.(2)) ;
 				add_code proc (fun () ->
-					reg_write ~bank:bank outs.(0)
+					reg_write outs.(0)
 						(big_int_mul_shift
-							(land_big_int regs.(bank).(ins.(0)) (big_int_mask sz))
-							(land_big_int regs.(bank).(ins.(1)) (big_int_mask sz))
-							shift))) }
-		| scale, [| Reg (1, sz) ; Reg (1, sz') ; Cst shift |], [| sz'' |]
+							(land_big_int (reg_read ins.(0)) (big_int_mask sz))
+							(land_big_int (reg_read ins.(1)) (big_int_mask sz))
+							(cst_read ins.(2))))) }
+		| scale, [| Reg (1, sz) ; Reg (1, sz') ; Cst _ |], [| sz'' |]
 			when scale * sz <= register_sizes.(1) &&
 				sz = sz' && sz = sz'' -> {
 			scratch = [| 0 |] ; perm = [||] ; out_banks = [| 1 |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs ->
-				assert (shift = ins.(2)) ;
 				add_code proc (fun () ->
-					let bank = 1 in
-					let parts_a = big_int_unpack scale sz regs.(bank).(ins.(0)) in
-					let parts_b = big_int_unpack scale sz regs.(bank).(ins.(1)) in
+					let parts_a = big_int_unpack scale sz (reg_read ins.(0)) in
+					let parts_b = big_int_unpack scale sz (reg_read ins.(1)) in
 					let results = List.map2 (fun a b ->
-						big_int_mul_shift a b shift) parts_a parts_b in
-					reg_write ~bank:bank outs.(0) (big_int_pack sz results))) }
+						big_int_mul_shift a b (cst_read ins.(2))) parts_a parts_b in
+					reg_write outs.(0) (big_int_pack sz results))) }
 		| _ -> raise Not_found
 
 	let pack565 specs =
-		let pack565_helper col_regs out_reg scale bank =
+		let pack565_helper col_regs out_reg scale =
 			let pack_r v = lsl_big_int (land_big_int v (big_int_of_int 0x1f)) 11 in
 			let pack_g v = lsl_big_int (land_big_int v (big_int_of_int 0x3f)) 5 in
 			let pack_b v = land_big_int v (big_int_of_int 0x1f) in
 			let out_v = ref zero_big_int in
 			for s = 0 to scale - 1 do
-				let r = lsr_big_int (regs.(bank).(col_regs.(0))) (s*8) in
-				let g = lsr_big_int (regs.(bank).(col_regs.(1))) (s*8) in
-				let b = lsr_big_int (regs.(bank).(col_regs.(2))) (s*8) in
+				let r = lsr_big_int ((reg_read col_regs.(0))) (s*8) in
+				let g = lsr_big_int ((reg_read col_regs.(1))) (s*8) in
+				let b = lsr_big_int ((reg_read col_regs.(2))) (s*8) in
 				let new_pack = add_big_int (pack_r r) (add_big_int (pack_g g) (pack_b b)) in
 				out_v := add_big_int !out_v (lsl_big_int new_pack (s*8))
 			done ;
-			reg_write ~bank:bank out_reg !out_v in
+			reg_write out_reg !out_v in
 		match specs with
 		| scale, [| Reg (0, 8) ; Reg (0, 8) ; Reg (0, 8) |], [| 16 |] when scale <= 2 -> {
 			scratch = [||] ; perm = [||] ; out_banks = [| 0 |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs -> add_code proc (fun () ->
-				pack565_helper ins outs.(0) scale 0)) }
+				pack565_helper ins outs.(0) scale)) }
 		| scale, [| Reg (1, 8) ; Reg (1, 8) ; Reg (1, 8) |], [| 16 |] when scale <= 8 -> {
 			scratch = [||] ; perm = [||] ; out_banks = [| 1 |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs -> add_code proc (fun () ->
-				pack565_helper ins outs.(0) scale 1)) }
+				pack565_helper ins outs.(0) scale)) }
 		| _ -> raise Not_found
 
 
 	let unpack565 specs =
-		let unpack565_helper pixel_reg out_regs scale bank =
+		let unpack565_helper pixel_reg out_regs scale =
 			let unpack_r v = land_big_int (lsr_big_int v 11) (big_int_of_int 0x1f) in
 			let unpack_g v = land_big_int (lsr_big_int v 5) (big_int_of_int 0x3f) in
 			let unpack_b v = land_big_int v (big_int_of_int 0x1f) in
 			let cols = Array.make 3 zero_big_int in
 			for s = 0 to scale - 1 do
-				let color = lsr_big_int regs.(bank).(pixel_reg) (s*16) in
+				let color = lsr_big_int (reg_read pixel_reg) (s*16) in
 				cols.(0) <- add_big_int cols.(0) (lsl_big_int (unpack_r color) (s*8)) ;
 				cols.(1) <- add_big_int cols.(1) (lsl_big_int (unpack_g color) (s*8)) ;
 				cols.(2) <- add_big_int cols.(2) (lsl_big_int (unpack_b color) (s*8))
 			done ;
-			Array.iteri (fun i reg -> reg_write ~bank:bank reg cols.(i)) out_regs in
+			Array.iteri (fun i reg -> reg_write reg cols.(i)) out_regs in
 		match specs with
 		| scale, [| Reg (0, 16) |], [| 8 ; 8 ; 8 |] when scale <= 2 -> {
 			scratch = [||] ; perm = [||] ; out_banks = [| 0 ; 0 ; 0 |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs -> add_code proc (fun () ->
-				unpack565_helper ins.(0) outs scale 0)) }
+				unpack565_helper ins.(0) outs scale)) }
 		| scale, [| Reg (1, 16) |], [| 8 ; 8 ; 8 |] when scale <= 8 -> {
 			scratch = [||] ; perm = [||] ; out_banks = [| 1 ; 1 ; 1 |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs -> add_code proc (fun () ->
-				unpack565_helper ins.(0) outs scale 1)) }
-		| _ -> Printf.printf "No impl of unpack565.\n" ; raise Not_found
+				unpack565_helper ins.(0) outs scale)) }
+		| _ -> raise Not_found
 
 	let var_read = function
 		| 1, [| Reg (0, 32) |], [| 8 |] -> {
 			scratch = [||] ; perm = [||] ; out_banks = [| 0 |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs -> add_code proc (fun () ->
-				reg_write outs.(0) (memory_read_8 (int_of_big_int regs.(0).(ins.(0)))))) }
+				reg_write outs.(0) (memory_read_8 (reg_read ins.(0)) 0))) }
 		| 1, [| Reg (0, 32) |], [| 32 |] -> {
 			scratch = [||] ; perm = [||] ; out_banks = [| 0 |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs -> add_code proc (fun () ->
-				reg_write outs.(0) (memory_read_32 (int_of_big_int regs.(0).(ins.(0)))))) }
+				reg_write outs.(0) (memory_read_32 (reg_read ins.(0)) 0))) }
 		| _ -> raise Not_found
 
 	let var_write = function
@@ -255,12 +270,12 @@ struct
 			scratch = [||] ; perm = [||] ; out_banks = [||] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch _outs -> add_code proc (fun () ->
-				memory_write_8 (int_of_big_int regs.(0).(ins.(0))) regs.(0).(ins.(1)))) }
+				memory_write_8 (reg_read ins.(0)) 0 (reg_read ins.(1)))) }
 		| 1, [| Reg (0, 32) ; Reg (0, 32) |], [||] -> {
 			scratch = [||] ; perm = [||] ; out_banks = [||] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch _outs -> add_code proc (fun () ->
-				memory_write_32 (int_of_big_int regs.(0).(ins.(0))) regs.(0).(ins.(1)))) }
+				memory_write_32 (reg_read ins.(0)) 0 (reg_read ins.(1)))) }
 		| _ -> raise Not_found
 
 	let stream_read = function
@@ -269,39 +284,45 @@ struct
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs -> add_code proc (fun () ->
 				reg_write outs.(0)
-					(memory_read_seq scale ((int_of_big_int regs.(0).(ins.(0))) + (int_of_big_int regs.(0).(proc.clock_reg)))))) }
+					(memory_read_seq scale (reg_read ins.(0))
+					(int_of_big_int (reg_read proc.clock_reg))))) }
 		| scale, [| Reg (0, 32) |], [| 16 |] when scale <= 2 -> {
 			scratch = [||] ; perm = [||] ; out_banks = [| 0 |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs -> add_code proc (fun () ->
 				reg_write outs.(0)
-					(memory_read_seq (scale*2) ((int_of_big_int regs.(0).(ins.(0))) + 2 * (int_of_big_int regs.(0).(proc.clock_reg)))))) }
+					(memory_read_seq (scale*2) (reg_read ins.(0))
+					(2 * (int_of_big_int (reg_read proc.clock_reg)))))) }
 		| 1, [| Reg (0, 32) |], [| 32 |] -> {
 			scratch = [||] ; perm = [||] ; out_banks = [| 0 |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs -> add_code proc (fun () ->
 				reg_write outs.(0)
-					(memory_read_32 ((int_of_big_int regs.(0).(ins.(0))) + 4 * (int_of_big_int regs.(0).(proc.clock_reg)))))) }
+					(memory_read_32 (reg_read ins.(0))
+					(4 * (int_of_big_int (reg_read proc.clock_reg)))))) }
 		| scale, [| Reg (0, 32) |], [| 8 |] when scale <= 16 -> {
 			scratch = [||] ; perm = [||] ; out_banks = [| 1 |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs -> add_code proc (fun () ->
 				reg_write outs.(1)
-					(memory_read_seq scale ((int_of_big_int regs.(0).(ins.(0))) + (int_of_big_int regs.(0).(proc.clock_reg)))))) }
+					(memory_read_seq scale (reg_read ins.(0))
+					(int_of_big_int (reg_read proc.clock_reg))))) }
 		| scale, [| Reg (0, 32) |], [| 16 |] when scale <= 8 -> {
 			scratch = [||] ; perm = [||] ; out_banks = [| 1 |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs -> add_code proc (fun () ->
 				reg_write outs.(1)
 					(memory_read_seq (scale*2)
-						((int_of_big_int regs.(0).(ins.(0))) + 2 * (int_of_big_int regs.(0).(proc.clock_reg)))))) }
+						(reg_read ins.(0))
+						(2 * (int_of_big_int (reg_read proc.clock_reg)))))) }
 		| scale, [| Reg (0, 32) |], [| 32 |] when scale <= 4 -> {
 			scratch = [||] ; perm = [||] ; out_banks = [| 0 |] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch outs -> add_code proc (fun () ->
 				reg_write outs.(1)
 					(memory_read_seq (scale*4)
-						((int_of_big_int regs.(0).(ins.(0))) + 4 * (int_of_big_int regs.(0).(proc.clock_reg)))))) }
+						(reg_read ins.(0))
+						(4 * (int_of_big_int (reg_read proc.clock_reg)))))) }
 		| _ -> raise Not_found
 
 	let stream_write = function
@@ -310,43 +331,49 @@ struct
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch _outs -> add_code proc (fun () ->
 				memory_write_seq scale
-					((int_of_big_int regs.(0).(ins.(0))) + (int_of_big_int regs.(0).(proc.clock_reg)))
-					regs.(0).(ins.(1)))) }
+					(reg_read ins.(0))
+					(int_of_big_int (reg_read proc.clock_reg))
+					(reg_read ins.(1)))) }
 		| scale, [| Reg (0, 32) ; Reg (0, 16) |], [||] when scale <= 2 -> {
 			scratch = [||] ; perm = [||] ; out_banks = [||] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch _outs -> add_code proc (fun () ->
 				memory_write_seq (2*scale)
-					((int_of_big_int regs.(0).(ins.(0))) + 2 * (int_of_big_int regs.(0).(proc.clock_reg)))
-					regs.(0).(ins.(1)))) }
+					(reg_read ins.(0))
+					(2 * (int_of_big_int (reg_read proc.clock_reg)))
+					(reg_read ins.(1)))) }
 		| 1, [| Reg (0, 32) ; Reg (0, 32) |], [||] -> {
 			scratch = [||] ; perm = [||] ; out_banks = [||] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch _outs -> add_code proc (fun () ->
 				memory_write_32
-					((int_of_big_int regs.(0).(ins.(0))) + 4 * (int_of_big_int regs.(0).(proc.clock_reg)))
-					regs.(0).(ins.(1)))) }
+					(reg_read ins.(0))
+					(4 * (int_of_big_int (reg_read proc.clock_reg)))
+					(reg_read ins.(1)))) }
 		| scale, [| Reg (0, 32) ; Reg (1, 8) |], [||] when scale <= 16 -> {
 			scratch = [||] ; perm = [||] ; out_banks = [||] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch _outs -> add_code proc (fun () ->
 				memory_write_seq scale
-					((int_of_big_int regs.(0).(ins.(0))) + (int_of_big_int regs.(0).(proc.clock_reg)))
-					regs.(1).(ins.(1)))) }
+					(reg_read ins.(0))
+					(int_of_big_int (reg_read proc.clock_reg))
+					(reg_read ins.(1)))) }
 		| scale, [| Reg (0, 32) ; Reg (1, 16) |], [||] when scale <= 8 -> {
 			scratch = [||] ; perm = [||] ; out_banks = [||] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch _outs -> add_code proc (fun () ->
 				memory_write_seq (2*scale)
-					((int_of_big_int regs.(0).(ins.(0))) + 2 * (int_of_big_int regs.(0).(proc.clock_reg)))
-					regs.(1).(ins.(1)))) }
+					(reg_read ins.(0))
+					(2 * (int_of_big_int (reg_read proc.clock_reg)))
+					(reg_read ins.(1)))) }
 		| scale, [| Reg (0, 32) ; Reg (1, 32) |], [||] when scale <= 4 -> {
 			scratch = [||] ; perm = [||] ; out_banks = [||] ;
 			preamble_emitter = (fun _proc _perms -> ()) ;
 			emitter = (fun proc ins _scratch _outs -> add_code proc (fun () ->
 				memory_write_seq (4*scale)
-					((int_of_big_int regs.(0).(ins.(0))) + 4 * (int_of_big_int regs.(0).(proc.clock_reg)))
-					regs.(1).(ins.(1)))) }
+					(reg_read ins.(0))
+					(4 * (int_of_big_int (reg_read proc.clock_reg)))
+					(reg_read ins.(1)))) }
 		| _ -> raise Not_found
 
 	let loop_head = function
@@ -359,8 +386,8 @@ struct
 				add_code proc (fun () ->
 					Printf.printf "(Re)Entering loop [%d -> %d].\n" loop.start loop.quit ;
 					if gt_big_int
-						(add_big_int regs.(0).(proc.clock_reg) (big_int_of_int scale))
-						regs.(0).(ins.(0))
+						(add_big_int (reg_read proc.clock_reg) (big_int_of_int scale))
+						(reg_read ins.(0))
 					then (
 						proc.pc <- loop.quit ;
 						Printf.printf "Leaving loop [%d -> %d].\n" loop.start loop.quit))) } 
@@ -375,7 +402,7 @@ struct
 				let loop_start = loop.start in
 				add_code proc (fun () ->
 					reg_write proc.clock_reg
-						(add_big_int (big_int_of_int scale) regs.(0).(proc.clock_reg)) ;
+						(add_big_int (big_int_of_int scale) (reg_read proc.clock_reg)) ;
 					proc.pc <- loop_start) ;
 				loop.quit <- proc.code_size ;
 				proc.loops <- loop.top) }
@@ -396,7 +423,7 @@ struct
 			(* FIXME: if we have no constant but only registers, do this ;
 			 * otherwise code must init regs with constant as well. *)
 			emitter = (fun proc _ins _scratch outs -> add_code proc (fun () ->
-				Array.iteri (fun i out_reg -> reg_write out_reg (big_int_of_int32 proc.params.(i))) outs)) }
+				Array.iteri (fun i out_reg -> reg_write out_reg (big_int_of_nativeint proc.params.(i))) outs)) }
 
 	(* Returns the context used by emitters. *)
 	let make_proc _nb_sources =
@@ -404,15 +431,15 @@ struct
 			pc = 0 ;
 			loops = None ;
 			code_size = 0 ;
-			clock_reg = 0 ;
+			clock_reg = Cst 0 ;
 			params = [||] ;
 			auto = [||] ;
 			code = Array.make 100 nop }
 
-	let emit_entry_point proc inits =
+	let emit_entry_point proc inits _used_regs =
 		proc.auto <- Array.make (Array.length inits) Int32.zero ;
 		Array.iteri (fun i -> function
-			| Param p -> add_code proc (fun () -> proc.auto.(i) <- proc.params.(p))
+			| Param p -> add_code proc (fun () -> proc.auto.(i) <- Nativeint.to_int32 proc.params.(p))
 			| Const c -> add_code proc (fun () -> proc.auto.(i) <- c)) inits
 
 	let emit_exit proc = add_code proc (fun () -> raise Exit)
