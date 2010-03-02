@@ -277,13 +277,13 @@ struct
 					(fun i ->
 						let b = fst (bank_of impl.Impl.perm i) in
 						let r = alloc_perm_of_bank b in
-						Hashtbl.add used_regs r true ;
+						Hashtbl.replace used_regs r true ;
 						r) ;
 				scratch_regs = Array.init (nb_regs impl.Impl.scratch)
 					(fun i ->
 						let b, r_in_bank = bank_of impl.Impl.scratch i in
 						let r = Reg (b, (first_scratch b) + r_in_bank) in
-						Hashtbl.add used_regs r true ;
+						Hashtbl.replace used_regs r true ;
 						r) ;
 				out_regs = Array.init (Array.length pp.output_names)
 					(fun i ->
@@ -296,7 +296,7 @@ struct
 						freelist_at_step.(symbol.death + 1) <-
 							(b, free_slot) :: freelist_at_step.(symbol.death + 1) ;
 						Printf.printf "Using register %d.%d for %s up to step %d\n" b rnum sym_name symbol.death ;
-						Hashtbl.add used_regs r true ;
+						Hashtbl.replace used_regs r true ;
 						r) ;
 				(* We cannot initialize in_regs for now, since we need to refer back to
 				 * previously created plan entries. So we create a dummy array here and will finish
