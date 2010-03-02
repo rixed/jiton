@@ -71,6 +71,13 @@ struct
 		| Cst x -> x
 		| _ -> failwith "Asking for the constant value of not a Cst"
 
+	let spec_in_name = function
+		| Reg (0, _) as reg -> Printf.sprintf "$%d" (reg_of reg)
+		| Reg (1, _) as reg -> Printf.sprintf "$f%d" (reg_of reg)
+		| Cst _ as cst -> Printf.sprintf "%d" (const_of cst)
+		| Auto x -> Printf.sprintf "auto.(%d)" x
+		| _ -> failwith "Invalid spec_in"
+
 	(* loop_descr is used to remember where a loop started and where it stops *) 
 	type loop_descr_record = { start : int ; blez : int ; top : loop_descr }
 	and loop_descr = loop_descr_record option
@@ -81,7 +88,7 @@ struct
 		  mutable params : word array ;	(* used by load_param operation *)
 		  mutable clock_reg : int ;	(* the number of our perm register that store loop counter *)
 		  mutable frame_size : int ; (* the size of our stack frame *)
-		  mutable callee_saved : (int * int) list } (* the reg and location of saved caller regs *)
+		  mutable callee_saved : (int * spec_in) list } (* the reg and location of saved caller regs *)
 
 	type op_impl =
 		{ scratch : int array ;
@@ -376,10 +383,13 @@ struct
 		(* Callee-saved registers and return address, that we are going to save
 		 * if we use them. *)
 		let is_callee_saved = function
-			| 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 28 | 30 -> true
-			(* return address is not really a callee saved reg, but we will treat it the same *)
-			| 31 -> true
-			| _ -> false in
+			| Reg (0, _) as r -> (match (reg_of r) with
+				| 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 28 | 30 -> true
+				(* return address is not really a callee saved reg, but we will treat it the same *)
+				| 31 -> true
+				| _ -> false)
+			| Reg (1, _) as r -> let r = reg_of r in r >= 20 && r <= 31
+			| _ -> failwith "Register is not a Reg" in
 		(* These are used to store function arguments.
 		 * We save them on the stack since we pretend these registers are available *)
 		let arg_regs = [| 4 ; 5 ; 6 ; 7 ; 8 ; 9 ; 10 ; 11 |] in
@@ -389,25 +399,29 @@ struct
 		proc.frame_size <- (Array.length arg_regs) * 8 ;
 		proc.callee_saved <- [] ;
 		Hashtbl.iter (fun r _ ->
-			let r = reg_of r in
 			if is_callee_saved r then (
-				Printf.printf "We save register $%d at offset %d\n" r proc.frame_size ;
 				(proc.callee_saved <- (proc.frame_size, r) :: proc.callee_saved ;
 				proc.frame_size <- proc.frame_size + 8))) used_regs ;
 		emit_ADDIU proc.buffer 29 29 (-proc.frame_size) ;
 		(* Save all registers used to pass arguments on top of this frame,
 		 * so that we can later easily retrieve them. *)
-		let save_reg offset reg = emit_SD proc.buffer reg 29 offset in
-		Array.iteri (fun i r -> save_reg (i*8) r) arg_regs ;
+		let save_reg offset r =
+			Printf.printf "Saving register %s at offset %d\n" (spec_in_name r) proc.frame_size ;
+			match r with
+				| Reg (0, _) -> emit_SD proc.buffer (reg_of r) 29 offset
+				| Reg (1, _) -> emit_SDC 1 proc.buffer (reg_of r) 29 offset
+				| _ -> failwith "Saved reg is not a Reg" in
+		Array.iteri (fun i r -> save_reg (i*8) (Reg (0, r))) arg_regs ;
 		(* Save the callee saved registers that we are going to use *)
 		List.iter (fun (offset, r) -> save_reg offset r) proc.callee_saved
 
 	let emit_exit proc =
 		(* Restore r31 and other callee-saved registers that were saved on the stack. *)
-		let restore_reg (offset, reg) = emit_LD proc.buffer reg 29 offset in
-		List.iter restore_reg proc.callee_saved ;
-(*		let arg_regs = [| 4 ; 5 ; 6 ; 7 ; 8 ; 9 ; 10 ; 11 |] in
-		Array.iteri (fun i r -> restore_reg (i*8, r)) arg_regs ; *)
+		let restore_reg offset r = match r with
+			| Reg (0, _) -> emit_LD proc.buffer (reg_of r) 29 offset
+			| Reg (1, _) -> emit_LDC 1 proc.buffer (reg_of r) 29 offset
+			| _ -> failwith "Restored reg is not a Reg" in
+		List.iter (fun (offset, r) -> restore_reg offset r) proc.callee_saved ;
 		(* Restore stack pointer and return to caller *)
 		emit_JR proc.buffer 31 ;
 		emit_ADDIU proc.buffer 29 29 proc.frame_size
