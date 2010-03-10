@@ -357,16 +357,12 @@ struct
 				proc.loops <- loop.top) }
 		| _ -> raise Not_found
 
-	let load_param (scale, ins, outs) =
-		ignore scale ;	(* For constants, load them scale times ? *)
-		assert (Array.length ins = 1) ;
-		assert (Array.length outs = 1) ;
-		match ins with
-		| [| Cst p |] ->
+	let load_param = function
+		| _, [| Cst p |], [| sz, _ |] when sz <= register_sizes.(0) ->
 			{ out_banks = [| 0 |] ; helpers = [||] ;
 			  emitter = (fun proc g -> add_code proc (fun () ->
-			  reg_write (g ">0") (big_int_of_nativeint proc.params.(int_of_word p)))) }
-		| _ -> invalid_arg "ins"
+			  	reg_write (g ">0") (big_int_of_nativeint proc.params.(int_of_word p)))) }
+		| _ -> raise Not_found
 
 	(* Returns the context used by emitters. *)
 	let make_proc _nb_sources =

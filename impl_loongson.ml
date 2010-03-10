@@ -358,17 +358,13 @@ struct
 			  	proc.loops <- loop.top) }
 		| _ -> raise Not_found
 
-	let load_param (scale, ins, outs) =
-		assert (Array.length ins = 1) ;
-		assert (Array.length outs = 1) ;
-		ignore scale ;
-		match ins with
-		| [| Cst p |] ->
+	let load_param = function
+		| _, [| Cst p |], [| sz, _ |] when sz <= 64 ->
 			{ out_banks = [| 0 |] ;
 			  helpers = [||] ;
 			  emitter = (fun proc g ->
 			  	emit_LD proc.buffer (reg_of (g ">0")) 29 (8 * (int_of_word p))) }
-		| _ -> invalid_arg "ins"
+		| _ -> raise Not_found
 
 	(* Returns the context used by emitters. *)
 	let make_proc _nb_sources =
