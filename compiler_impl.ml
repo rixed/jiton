@@ -44,8 +44,8 @@ struct
 		Printf.sprintf "%d bits, %s" size (string_of_sign sign)
 	let string_of_spec_in specs =
 		let string_of_spec = function
-			| Reg (bank, dtype) -> Printf.sprintf "Reg (bank=%d, dtype=%s)" bank (string_of_data_type dtype)
-			| Cst size -> Printf.sprintf "Cst size=%d" size in
+			| Impl.Reg (bank, dtype) -> Printf.sprintf "Reg (bank=%d, dtype=%s)" bank (string_of_data_type dtype)
+			| Impl.Cst c -> Printf.sprintf "Cst %s" (Impl.string_of_word c) in
 		(Array.fold_left (fun prefix spec -> prefix^(string_of_spec spec)^"; ") "[ " specs)^" ] "
 	let string_of_spec_out specs =
 		let string_of_spec dtype = Printf.sprintf "dtype=%s" (string_of_data_type dtype) in
@@ -86,10 +86,10 @@ struct
 					(* Build input and output specifier. *)
 					let specs_in = Array.map (fun sym_name ->
 						(* Is it a constant ? *)
-						try Cst (bitsize_of (int_of_string sym_name))
+						try Impl.Cst (Impl.word_of_string sym_name)
 						with Failure _ -> (	(* Or get info from the symbol table. *)
 							let symbol = Hashtbl.find symbols sym_name in
-							Reg (symbol.bank, symbol.data_type))) inputs in
+							Impl.Reg (symbol.bank, symbol.data_type))) inputs in
 					let specs_out = Array.map snd outputs in
 					(* If we can't find it, we could still achieve the same result by repeating scale
 					 * times the implementation for scale=1. *)
@@ -113,9 +113,9 @@ struct
 		(* Add func parameters loading into registers *)
 		let load_params =
 			let loader n =
-				{ impl = Impl.load_param (1, [| Cst (bitsize_of n) |], [| func_param_dtypes.(n) |]) ;
+				{ impl = Impl.load_param (1, [| Impl.Cst (Impl.word_of_int n) |], [| func_param_dtypes.(n) |]) ;
 				  kind = Loop_body ;
-				  input_names = [| string_of_int n |] ;
+				  input_names = [||] ;
 				  output_names = [| func_param_names.(n) |] } in
 			Array.mapi (fun n _dtype -> loader n) func_param_dtypes in
 		(* Given a path, expand inline helper emitters, add loop_head/tail and
@@ -155,7 +155,7 @@ struct
 				!add_invariant @ prev_plan @ !add_inline @ [new_step] in
 			let loop_head =
 				(* TODO: here the first param is assumed to be the length of the loop... *)
-				{ impl = Impl.loop_head (scale, [| Reg (0, func_param_dtypes.(0)) |], [||]) ;
+				{ impl = Impl.loop_head (scale, [| Impl.Reg (0, func_param_dtypes.(0)) |], [||]) ;
 				  input_names = [| func_param_names.(0) |] ; output_names = [||] ;
 				  kind = Loop_head } in
 			let loop_tail =
@@ -314,12 +314,9 @@ struct
 				Printf.printf "looking for symbol %s\n" n ;
 				let symbol = Hashtbl.find symbols n in
 				assert (symbol.birth <= step && symbol.death >= step) ;
-				Impl.Vreg (symbol.alloc_bank, symbol.alloc_reg) in
-			let get_sym_or_const n =
-				try Impl.Vcst (Impl.word_of_string n)
-				with Failure _ -> get_symbol n in
+				symbol.alloc_bank, symbol.alloc_reg in
 			let get_input idx =
-				get_sym_or_const plan.(step).input_names.(idx) in
+				get_symbol plan.(step).input_names.(idx) in
 			let get_output idx =
 				get_symbol plan.(step).output_names.(idx) in
 			(* By convention, names matching '<i' means ith input

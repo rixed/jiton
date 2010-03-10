@@ -55,10 +55,7 @@ struct
 	let int_of_word = Int32.to_int
 	let nativeint_of_word = Nativeint.of_int32
 	let word_of_string = Int32.of_string
-
-	type val_id =
-		| Vreg of reg_id
-		| Vcst of word
+	let string_of_word = Int32.to_string
 
 	(* Registers *)
 	let register_sets = [|
@@ -66,24 +63,17 @@ struct
 		32 (* number of FP/MMX registers *) |]
 	
 	let reg_of = function
-		| Vreg (0, r) ->
+		| 0, r ->
 			if r = 0 then 30
 			else if r = 29 then 31
 			else r
-		| Vreg (_, c) -> c
-		| _ -> failwith "Asking for the reg number of not a Reg"
+		| _, c -> c
 	
-	let const_of = function
-		| Vcst x -> x
-		| _ -> failwith "Asking for the constant value of not a Cst"
-	
-	let int_const_of v = int_of_word (const_of v)
-
 	let string_of_reg_id (b, r) =
-		if b = 0 then Printf.sprintf "$%d" (reg_of (Vreg (0, r)))
+		if b = 0 then Printf.sprintf "$%d" (reg_of (0, r))
 		else (
 			assert (b = 1) ;
-			Printf.sprintf "$f%d" (reg_of (Vreg (1, r))))
+			Printf.sprintf "$f%d" (reg_of (1, r)))
 
 	(* loop_descr is used to remember where a loop started and where it stops *) 
 	type loop_descr_record = { start : int ; blez : int ; top : loop_descr }
@@ -96,12 +86,15 @@ struct
 		  mutable frame_size : int ; (* the size of our stack frame *)
 		  mutable callee_saved : (int * reg_id) list } (* the reg and location of saved caller regs *)
 
-	type emitter = proc -> (string -> val_id) -> unit
+	type emitter = proc -> (string -> reg_id) -> unit
 	type op_impl =
 		{ helpers : (bank_num * string * emitter option) array ;
 		  out_banks : bank_num array ;
 		  emitter : emitter }
 
+	type spec_in =
+		| Reg of (bank_num * data_type)
+		| Cst of word
 	type impl_lookup = scale * spec_in array * spec_out array -> op_impl
 
 	(* Misc *)
@@ -217,7 +210,7 @@ struct
 		| 1, [| Reg (0, (sz, sign)) ; Reg (0, (sz', sign')) ; Cst shift |], [| (sz'', sign'') |]
 			when sz = sz' && sz <= 64 && sz'' <= 64
 				&& sign = sign' && sign = sign''
-				&& shift <= sz -> {
+				&& shift < 64l -> {
 			out_banks = [| 0 |] ;
 			helpers = [||] ;
 			emitter = (fun proc g ->
@@ -226,7 +219,7 @@ struct
 				) else (
 					if sign = Signed then emit_DMULTG else emit_DMULTUG
 				)) proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) (reg_of (g "<1")) ;
-				let shift = int_const_of (g "<2") in
+				let shift = int_of_word shift in
 				if shift > 0 then (
 					(if sz > 32 then emit_DSRL else emit_SRL)
 						proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) shift)) } 
@@ -369,10 +362,13 @@ struct
 		assert (Array.length ins = 1) ;
 		assert (Array.length outs = 1) ;
 		ignore scale ;
-		{ out_banks = [| 0 |] ;
-		  helpers = [||] ;
-		  emitter = (fun proc g ->
-		  	emit_LD proc.buffer (reg_of (g ">0")) 29 (8 * (int_const_of (g "<0")))) }
+		match ins with
+		| [| Cst p |] ->
+			{ out_banks = [| 0 |] ;
+			  helpers = [||] ;
+			  emitter = (fun proc g ->
+			  	emit_LD proc.buffer (reg_of (g ">0")) 29 (8 * (int_of_word p))) }
+		| _ -> invalid_arg "ins"
 
 	(* Returns the context used by emitters. *)
 	let make_proc _nb_sources =
@@ -388,12 +384,12 @@ struct
 		(* Callee-saved registers and return address, that we are going to save
 		 * if we use them. *)
 		let is_callee_saved = function
-			| 0, r -> (match reg_of (Vreg (0, r)) with
+			| 0, r -> (match reg_of (0, r) with
 				| 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 28 | 30 -> true
 				(* return address is not really a callee saved reg, but we will treat it the same *)
 				| 31 -> true
 				| _ -> false)
-			| 1, r -> let r = reg_of (Vreg (1, r)) in r >= 20 && r <= 31
+			| 1, r -> let r = reg_of (1, r) in r >= 20 && r <= 31
 			| _ -> failwith "Register is not a Reg" in
 		(* These are used to store function arguments.
 		 * We save them on the stack since we pretend these registers are available *)
@@ -413,8 +409,8 @@ struct
 		let save_reg offset r =
 			Printf.printf "Saving register %s at offset %d\n" (string_of_reg_id r) proc.frame_size ;
 			match r with
-				| 0, _ -> emit_SD proc.buffer (reg_of (Vreg r)) 29 offset
-				| 1, _ -> emit_SDC 1 proc.buffer (reg_of (Vreg r)) 29 offset
+				| 0, _ -> emit_SD proc.buffer (reg_of r) 29 offset
+				| 1, _ -> emit_SDC 1 proc.buffer (reg_of r) 29 offset
 				| _ -> failwith "Saved reg is not a Reg" in
 		Array.iteri (fun i r -> save_reg (i*8) (0, r)) arg_regs ;
 		(* Save the callee saved registers that we are going to use *)
@@ -423,8 +419,8 @@ struct
 	let emit_exit proc =
 		(* Restore r31 and other callee-saved registers that were saved on the stack. *)
 		let restore_reg offset r = match r with
-			| 0, _ -> emit_LD proc.buffer (reg_of (Vreg r)) 29 offset
-			| 1, _ -> emit_LDC 1 proc.buffer (reg_of (Vreg r)) 29 offset
+			| 0, _ -> emit_LD proc.buffer (reg_of r) 29 offset
+			| 1, _ -> emit_LDC 1 proc.buffer (reg_of r) 29 offset
 			| _ -> failwith "Restored reg is not a Reg" in
 		List.iter (fun (offset, r) -> restore_reg offset r) proc.callee_saved ;
 		(* Restore stack pointer and return to caller *)

@@ -87,6 +87,7 @@ struct
 	let word_of_int = Int32.of_int
 	let int_of_word = Int32.to_int
 	let word_of_string = Int32.of_string
+	let string_of_word = Int32.to_string
 	let nativeint_of_word = Nativeint.of_int32
 
 	type initer = Param of int | Const of word
@@ -103,17 +104,16 @@ struct
 		  (* We use an array for code since we use index in this array as loop labels *)
 		  code : instruction array }
 
-	type val_id =
-		| Vreg of reg_id
-		| Vcst of word
-
-	type emitter = proc -> (string -> val_id) -> unit
+	type emitter = proc -> (string -> reg_id) -> unit
 	
 	type op_impl =
 		{ helpers : (bank_num * string * emitter option) array ;
 		  out_banks : bank_num array ;
 		  emitter : emitter }
 
+	type spec_in =
+		| Reg of (bank_num * data_type)
+		| Cst of word
 	type impl_lookup = scale * spec_in array * spec_out array -> op_impl
 
 	(* Registers *)
@@ -129,23 +129,13 @@ struct
 
 	let regs = Array.init nb_banks (fun bank -> Array.make register_sets.(bank) zero_big_int)
 
-	let reg_write reg v_ = match reg with
-		| Vreg (bank, r) ->
-			let v = land_big_int v_ register_masks.(bank) in
-			Printf.printf "reg.(%d).(%d) <- %s\n" bank r (string_of_big_int v) ;
-			regs.(bank).(r) <- v
-		| _ -> failwith "Try to write in something not a register"
+	let reg_write (bank, r) v_ =
+		let v = land_big_int v_ register_masks.(bank) in
+		Printf.printf "reg.(%d).(%d) <- %s\n" bank r (string_of_big_int v) ;
+		regs.(bank).(r) <- v
 	
-	let reg_read = function
-		| Vreg (bank, r) -> regs.(bank).(r)
-		| _ -> failwith "Try to read from something not a register"
+	let reg_read (bank, r) = regs.(bank).(r)
 	
-	let cst_read = function
-		| Vcst c -> c
-		| _ -> failwith "Constant is not a constant"
-
-	let cst_read_int v = int_of_word (cst_read v)
-
 	let add_code proc f =
 		proc.code.(proc.code_size) <- f ;
 		proc.code_size <- proc.code_size + 1
@@ -172,7 +162,7 @@ struct
 		| _ -> raise Not_found
 
 	let mul_rshift = function
-		| 1, [| Reg (bank, (sz, sign)) ; Reg (bank', (sz', sign')) ; Cst _ |], [| (sz'', sign'') |]
+		| 1, [| Reg (bank, (sz, sign)) ; Reg (bank', (sz', sign')) ; Cst shift |], [| (sz'', sign'') |]
 			when bank = bank' &&
 				sz = sz' && sz = sz'' &&
 				bank < nb_banks && sz <= register_sizes.(bank) &&
@@ -184,8 +174,8 @@ struct
 						(big_int_mul_shift
 							(land_big_int (reg_read (g "<0")) (big_int_mask sz))
 							(land_big_int (reg_read (g "<1")) (big_int_mask sz))
-							(cst_read_int (g "<2"))))) }
-		| scale, [| Reg (1, (sz, sign)) ; Reg (1, (sz', sign')) ; Cst _ |], [| (sz'', sign'') |]
+							(int_of_word shift)))) }
+		| scale, [| Reg (1, (sz, sign)) ; Reg (1, (sz', sign')) ; Cst shift |], [| (sz'', sign'') |]
 			when scale * sz <= register_sizes.(1) &&
 				sz = sz' && sz = sz'' &&
 				sign = sign' && sign = sign'' -> {
@@ -195,7 +185,7 @@ struct
 					let parts_a = big_int_unpack scale sz (reg_read (g "<0")) in
 					let parts_b = big_int_unpack scale sz (reg_read (g "<1")) in
 					let results = List.map2 (fun a b ->
-						big_int_mul_shift a b (cst_read_int (g "<2"))) parts_a parts_b in
+						big_int_mul_shift a b (int_of_word shift)) parts_a parts_b in
 					reg_write (g ">0") (big_int_pack sz results))) }
 		| _ -> raise Not_found
 
@@ -371,13 +361,12 @@ struct
 		ignore scale ;	(* For constants, load them scale times ? *)
 		assert (Array.length ins = 1) ;
 		assert (Array.length outs = 1) ;
-(*		assert (ins = [| Cst x |]);
-		assert ([| out_size, _sign, _ovfl |] = outs);
-		assert (out_size <= register_sizes.(0)) ; *)
-		{
-			out_banks = [| 0 |] ; helpers = [||] ;
-			emitter = (fun proc g -> add_code proc (fun () ->
-				reg_write (g ">0") (big_int_of_nativeint proc.params.(cst_read_int (g "<0"))))) }
+		match ins with
+		| [| Cst p |] ->
+			{ out_banks = [| 0 |] ; helpers = [||] ;
+			  emitter = (fun proc g -> add_code proc (fun () ->
+			  reg_write (g ">0") (big_int_of_nativeint proc.params.(int_of_word p)))) }
+		| _ -> invalid_arg "ins"
 
 	(* Returns the context used by emitters. *)
 	let make_proc _nb_sources =

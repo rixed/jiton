@@ -35,11 +35,6 @@ type reg_id = bank_num * reg_num
 (* How many parallel actions are performed by an operation implementation *)
 type scale = int
 
-(* Used to specify inputs of the operations. *)
-type spec_in =
-	| Reg of (bank_num * data_type)
-	| Cst of data_size
-
 (* Used to specify expected outputs *)
 type spec_out = data_type
 
@@ -70,6 +65,12 @@ sig
 	type word
 	val word_of_int : int -> word
 	val word_of_string : string -> word
+	val string_of_word : word -> string
+
+	(* Used to specify inputs of the operations. *)
+	type spec_in =
+		| Reg of (bank_num * data_type)
+		| Cst of word
 
 	(* But then, if you plan to execute it we want to be able to convert
 	 * it to nativeint. *)
@@ -93,12 +94,7 @@ sig
 	(* Emit code to exit the procedure (and clear auto storage) *)
 	val emit_exit : proc -> unit
 
-	(* The getter for symbols returns this : *)
-	type val_id =
-		| Vreg of reg_id
-		| Vcst of word
-
-	type emitter = proc -> (string -> val_id) -> unit
+	type emitter = proc -> (string -> reg_id) -> unit
 
 	(* An operation implementation *)
 	type op_impl =
