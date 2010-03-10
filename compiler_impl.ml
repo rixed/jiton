@@ -123,35 +123,30 @@ struct
 		let helper_expanded = Hashtbl.create 10 in
 		let loop_of_path path scale =
 			let expand_plan prev_plan prog_step =
-				let { impl=impl; input_names=inputs } = prog_step in
 				(* Add helpers to inputs *)
 				let add_inputs = ref [] in
 				(* Add outputing steps in invariants or inline, if not already done. *)
-				let add_invariant = ref [] in
-				let add_inline = ref [] in
-				Array.iter (fun (bank, name, emitter_opt) ->
-					add_inputs := name :: !add_inputs ;
-					if not (Hashtbl.mem helper_expanded name) then (
-						Hashtbl.add helper_expanded name true ;
-						match emitter_opt with
-							| None -> (* inline dummy outputer *)
-								add_inline :=
-									{ impl = { Impl.out_banks = [| bank |] ;
-									           Impl.helpers = [||] ;
-									           Impl.emitter = (fun _ _ -> ()) } ;
-									  input_names = [||] ; output_names = [| name |] ;
-									  kind = Loop_body } :: !add_inline
-							| Some invariant ->
-								add_invariant :=
-									{ impl = { Impl.out_banks = [| bank |] ;
-									           Impl.helpers = [||] ;
-									           Impl.emitter = invariant } ;
-									  input_names = [||] ; output_names = [| name |] ;
-									  kind = Loop_body } :: !add_invariant))
-					impl.Impl.helpers ;
+				let add_invariant = ref ([] : plan_step list) in
+				let add_inline = ref ([] : plan_step list) in
+				let rec expand_step step =
+					Array.iter (fun (kind, name, impl') ->
+						add_inputs := name :: !add_inputs ;
+						if not (Hashtbl.mem helper_expanded name) then (
+							Hashtbl.add helper_expanded name true ;
+							let inserted_step =
+								{ impl = impl' ;
+								  input_names = [||] ; output_names = [| name |] ;
+								  kind = Loop_body } in
+							let l = if kind = Inline then add_inline else add_invariant in
+							l := inserted_step :: !l ;
+							(* Now continue prepending new steps in add_inline/invariant *)
+							expand_step inserted_step))
+						step.impl.Impl.helpers in
+				expand_step prog_step ;
 				let new_step =
 					{ prog_step with
-					  input_names = Array.concat [ inputs ; Array.of_list !add_inputs ] } in
+					  input_names = Array.concat
+					  	[ prog_step.input_names ; Array.of_list !add_inputs ] } in
 				!add_invariant @ prev_plan @ !add_inline @ [new_step] in
 			let loop_head =
 				(* TODO: here the first param is assumed to be the length of the loop... *)

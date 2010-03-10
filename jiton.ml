@@ -38,6 +38,8 @@ type scale = int
 (* Used to specify expected outputs *)
 type spec_out = data_type
 
+type helper_kind = Invariant | Inline
+
 (*
  * Some helpers implementors might find convenient
  *)
@@ -98,7 +100,7 @@ sig
 
 	(* An operation implementation *)
 	type op_impl =
-		{ helpers : (bank_num * string * emitter option) array ;
+		{ helpers : (helper_kind * string * op_impl) array ;
 		  out_banks : bank_num array ;	(* to which banks the outputs are assigned *)
 		  (* This code performs the operation in the main loop *)
 		  emitter : emitter }

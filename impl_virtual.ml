@@ -107,7 +107,7 @@ struct
 	type emitter = proc -> (string -> reg_id) -> unit
 	
 	type op_impl =
-		{ helpers : (bank_num * string * emitter option) array ;
+		{ helpers : (helper_kind * string * op_impl) array ;
 		  out_banks : bank_num array ;
 		  emitter : emitter }
 
@@ -147,8 +147,10 @@ struct
 
 	(* Helpers *)
 	(* We need a var as the clock source for our loops and stream reads/writes. *)
-	let clock_var = 0, "clock",
-		Some (fun proc g -> add_code proc (fun () -> reg_write (g "clock") zero_big_int))
+	let clock_var = Invariant, "clock",
+		{ out_banks = [| 0 |] ; helpers = [||] ;
+		  emitter = (fun proc g ->
+		  	add_code proc (fun () -> reg_write (g "clock") zero_big_int)) }
 
 	(* Implemented Operations. *)
 

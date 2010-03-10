@@ -88,7 +88,7 @@ struct
 
 	type emitter = proc -> (string -> reg_id) -> unit
 	type op_impl =
-		{ helpers : (bank_num * string * emitter option) array ;
+		{ helpers : (helper_kind * string * op_impl) array ;
 		  out_banks : bank_num array ;
 		  emitter : emitter }
 
@@ -192,7 +192,26 @@ struct
 	
 	(* Helper vars *)
 
-	let clock_var = 0, "clock", Some (fun proc g -> emit_DADDU proc.buffer (reg_of (g "clock")) 0 0)
+	let clock_var = Invariant, "clock",
+		{ out_banks = [| 0 |] ; helpers = [||] ;
+		  emitter = (fun proc g -> emit_DADDU proc.buffer (reg_of (g "clock")) 0 0) }
+
+	let make_scratch bank name = Inline, name,
+		{ out_banks = [| bank |] ; helpers = [||] ;
+		  emitter = (fun _proc _g -> ()) }
+
+	let const_name bank c = "const_"^(string_of_int bank)^"_"^(string_of_word c)
+	let make_const bank c =
+		let name = const_name bank c in
+		let scratch = make_unique "scratch_for_const" in
+		Invariant, name, { out_banks = [| bank |] ; helpers = [| make_scratch 0 scratch |] ;
+			emitter = (fun proc g ->
+				if bank = 0 then
+					emit_LI proc.buffer (reg_of (g name)) c
+				else (
+					assert (bank = 1) ;
+					emit_LI proc.buffer (reg_of (g scratch)) c ;
+					emit_DMTC1 proc.buffer (reg_of (g scratch)) (reg_of (g name)))) }
 
 	(* Implemented Operations. *)
 
@@ -229,7 +248,7 @@ struct
 		| 1, [| Reg (0, (8, _)) ; Reg (0, (8, _)) ; Reg (0, (8, _)) |], [| 16, _ |] ->
 			let scratch = make_unique "scratch_565" in
 			{ out_banks = [| 0 |] ;
-			  helpers = [| 0, scratch, None |] ;
+			  helpers = [| make_scratch 0 scratch |] ;
 			  emitter = (fun proc g ->
 			  	emit_ANDI proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) 0xf8 ; (* R *)
 				emit_SLL  proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) 8 ;
@@ -257,7 +276,7 @@ struct
 		| 1, [| Reg (0, (32, Unsigned)) |], [| 64, _ |] ->
 			let scratch = make_unique "scratch_read" in
 			{ out_banks = [| 0 |] ;
-			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  helpers = [| make_scratch 0 scratch ; clock_var |] ;
 			  emitter = (fun proc g ->
 			  	emit_SLL  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) 3 ;
 			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g "<0")) ;
@@ -265,7 +284,7 @@ struct
 		| 1, [| Reg (0, (32, Unsigned)) |], [| 32, sign |] ->
 			let scratch = make_unique "scratch_read" in
 			{ out_banks = [| 0 |] ;
-			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  helpers = [| make_scratch 0 scratch ; clock_var |] ;
 			  emitter = (fun proc g ->
 			  	emit_SLL  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) 2 ;
 			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g "<0")) ;
@@ -274,7 +293,7 @@ struct
 		| 1, [| Reg (0, (32, Unsigned)) |], [| 16, sign |] ->
 			let scratch = make_unique "scratch_read" in
 			{ out_banks = [| 0 |] ;
-			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  helpers = [| make_scratch 0 scratch ; clock_var |] ;
 			  emitter = (fun proc g ->
 			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "clock")) ;
 			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g "<0")) ;
@@ -283,7 +302,7 @@ struct
 		| 1, [| Reg (0, (32, Unsigned)) |], [| 8, sign |] ->
 			let scratch = make_unique "scratch_read" in
 			{ out_banks = [| 0 |] ;
-			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  helpers = [| make_scratch 0 scratch ; clock_var |] ;
 			  emitter = (fun proc g ->
 			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "<0")) ;
 			  	(if sign = Signed then emit_LB else emit_LBU)
@@ -294,7 +313,7 @@ struct
 		| 1, [| Reg (0, (32, Unsigned)) ; Reg (0, (64, _)) |], [||] ->
 			let scratch = make_unique "scratch_write" in
 			{ out_banks = [||] ;
-			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  helpers = [| make_scratch 0 scratch ; clock_var |] ;
 			  emitter = (fun proc g ->
 			  	emit_SLL  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) 3 ;
 			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g "<0")) ;
@@ -302,7 +321,7 @@ struct
 		| 1, [| Reg (0, (32, Unsigned)) ; Reg (0, (32, _)) |], [||] ->
 			let scratch = make_unique "scratch_write" in
 			{ out_banks = [||] ;
-			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  helpers = [| make_scratch 0 scratch ; clock_var |] ;
 			  emitter = (fun proc g ->
 			  	emit_SLL  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) 2 ;
 			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g "<0")) ;
@@ -310,7 +329,7 @@ struct
 		| 1, [| Reg (0, (32, Unsigned)) ; Reg (0, (16, _)) |], [||] ->
 			let scratch = make_unique "scratch_write" in
 			{ out_banks = [||] ;
-			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  helpers = [| make_scratch 0 scratch ; clock_var |] ;
 			  emitter = (fun proc g ->
 			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "clock")) ;
 			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g "<0")) ;
@@ -318,7 +337,7 @@ struct
 		| 1, [| Reg (0, (32, Unsigned)) ; Reg (0, (8, _)) |], [||] ->
 			let scratch = make_unique "scratch_write" in
 			{ out_banks = [||] ;
-			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  helpers = [| make_scratch 0 scratch ; clock_var |] ;
 			  emitter = (fun proc g ->
 			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "<0")) ;
 			  	emit_SB   proc.buffer (reg_of (g "<1")) (reg_of (g scratch)) 0) }
@@ -331,7 +350,7 @@ struct
 			  (* FIXME: the compiler don't know that we don't need the value of this scratch
 			   * register from one run to another, and as a result will keep the register for
 			   * the whole loop. *)
-			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  helpers = [| make_scratch 0 scratch ; clock_var |] ;
 			  emitter = (fun proc g ->
 			  	let loop_start = Codebuf.offset proc.buffer in
 			  	(* First test if clock + scale > width, and if so jump forward to quit label
