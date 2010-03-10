@@ -52,7 +52,13 @@ and Loongson : IMPLEMENTER =
 struct
 	type word = int32
 	let word_of_int = Int32.of_int
+	let int_of_word = Int32.to_int
 	let nativeint_of_word = Nativeint.of_int32
+	let word_of_string = Int32.of_string
+
+	type val_id =
+		| Vreg of reg_id
+		| Vcst of word
 
 	(* Registers *)
 	let register_sets = [|
@@ -60,23 +66,24 @@ struct
 		32 (* number of FP/MMX registers *) |]
 	
 	let reg_of = function
-		| Reg (0, r) ->
+		| Vreg (0, r) ->
 			if r = 0 then 30
 			else if r = 29 then 31
 			else r
-		| Reg (_, c) -> c
+		| Vreg (_, c) -> c
 		| _ -> failwith "Asking for the reg number of not a Reg"
 	
 	let const_of = function
-		| Cst x -> x
+		| Vcst x -> x
 		| _ -> failwith "Asking for the constant value of not a Cst"
+	
+	let int_const_of v = int_of_word (const_of v)
 
-	let spec_in_name = function
-		| Reg (0, _) as reg -> Printf.sprintf "$%d" (reg_of reg)
-		| Reg (1, _) as reg -> Printf.sprintf "$f%d" (reg_of reg)
-		| Cst _ as cst -> Printf.sprintf "%d" (const_of cst)
-		| Auto x -> Printf.sprintf "auto.(%d)" x
-		| _ -> failwith "Invalid spec_in"
+	let string_of_reg_id (b, r) =
+		if b = 0 then Printf.sprintf "$%d" (reg_of (Vreg (0, r)))
+		else (
+			assert (b = 1) ;
+			Printf.sprintf "$f%d" (reg_of (Vreg (1, r))))
 
 	(* loop_descr is used to remember where a loop started and where it stops *) 
 	type loop_descr_record = { start : int ; blez : int ; top : loop_descr }
@@ -86,20 +93,14 @@ struct
 		{ buffer : Codebuf.t ;	(* program counter *)
 		  mutable loops : loop_descr ;	(* used only when emitting code not when running *)
 		  mutable params : word array ;	(* used by load_param operation *)
-		  mutable clock_reg : int ;	(* the number of our perm register that store loop counter *)
 		  mutable frame_size : int ; (* the size of our stack frame *)
-		  mutable callee_saved : (int * spec_in) list } (* the reg and location of saved caller regs *)
+		  mutable callee_saved : (int * reg_id) list } (* the reg and location of saved caller regs *)
 
+	type emitter = proc -> (string -> val_id) -> unit
 	type op_impl =
-		{ scratch : int array ;
-		  perm : int array ;
+		{ helpers : (bank_num * string * emitter option) array ;
 		  out_banks : bank_num array ;
-		  preamble_emitter : proc -> spec_in array (* perm regs *) -> unit ;
-		  emitter : proc ->
-		  	spec_in array (* input regs *) ->
-		  	spec_in array (* scratch regs *) ->
-		  	spec_in array (* output regs *) ->
-		  	unit }
+		  emitter : emitter }
 
 	type impl_lookup = scale * spec_in array * spec_out array -> op_impl
 
@@ -108,7 +109,8 @@ struct
 		| None -> failwith "Nothing where something was expected."
 		| Some x -> x
 
-	(* MIPS instruction encoding *)
+	(*MIPS instruction encoding *)
+
 	let append_hw buffer value =
 		Codebuf.append buffer (value land 0xff) ;
 		Codebuf.append buffer ((value lsr 8) land 0xff)
@@ -148,6 +150,9 @@ struct
 	let emit_LW  buffer reg base offset = emit_I_type buffer 0b100011 base reg offset
 	let emit_LWU buffer reg base offset = emit_I_type buffer 0b100111 base reg offset
 	let emit_LD  buffer reg base offset = emit_I_type buffer 0b110111 base reg offset
+	
+	let emit_SDC copro buffer reg base offset = emit_I_type buffer (0b111100 lor copro) base reg offset
+	let emit_LDC copro buffer reg base offset = emit_I_type buffer (0b110100 lor copro) base reg offset
 
 	let emit_DADDIU buffer dest source imm = emit_I_type buffer 0b011001 source dest imm
 	let emit_ADDIU  buffer dest source imm = emit_I_type buffer 0b001001 source dest imm
@@ -166,7 +171,9 @@ struct
 	let emit_BLTZ buffer reg offset = emit_I_type buffer 0b000001 reg 0 offset
 	let emit_BEQ  buffer r1 r2 offset = emit_I_type buffer 0b000100 r1 r2 offset
 	
+	let emit_MULTG   buffer dest a b = emit_R_type buffer 0b011100 a b dest 0b00000 0b010000
 	let emit_MULTUG  buffer dest a b = emit_R_type buffer 0b011100 a b dest 0b00000 0b010010
+	let emit_DMULTG  buffer dest a b = emit_R_type buffer 0b011100 a b dest 0b00000 0b010001
 	let emit_DMULTUG buffer dest a b = emit_R_type buffer 0b011100 a b dest 0b00000 0b010011
 	
 	let emit_SLL  buffer dest reg shift = emit_R_type buffer 0b000000 0 reg dest shift 0b000000
@@ -178,201 +185,199 @@ struct
 			emit_R_type buffer 0b000000 0 reg dest shift 0b111000
 		else
 			emit_R_type buffer 0b000000 0 reg dest (shift-32) 0b111100
+	let emit_DSRL buffer dest reg shift =
+		if shift < 32 then
+			emit_R_type buffer 0b000000 0 reg dest shift 0b111010
+		else
+			emit_R_type buffer 0b000000 0 reg dest (shift-32) 0b111110
+		
 	let emit_NOP buffer = emit_OR buffer 1 1 0 (*emit_SLL buffer 0 0 0*)
 	
 	let patch_imm buffer addr imm =
 		Codebuf.patch_byte buffer addr (imm land 0xff) 0xff ;
 		Codebuf.patch_byte buffer (addr+1) (imm lsr 8) 0xff
+	
+	(* Helper vars *)
+
+	let clock_var = 0, "clock", Some (fun proc g -> emit_DADDU proc.buffer (reg_of (g "clock")) 0 0)
 
 	(* Implemented Operations. *)
 
 	let add = function
-		| 1, [| Reg (0, sz) ; Reg (0, sz') |], [| sz'' |]
-			when sz = sz' && sz = sz'' && sz <= 64 -> {
-			scratch = [||] ; perm = [||] ; out_banks = [| 0 |] ;
-			preamble_emitter = no_preamble ;
-			emitter = (fun proc ins _scratch outs ->
-				(if sz <= 32 then emit_ADDU else emit_DADDU)
-					proc.buffer (reg_of outs.(0)) (reg_of ins.(1)) (reg_of ins.(2))) }
+		| 1, [| Reg (0, (sz, _)) ; Reg (0, (sz', _)) |], [| sz'', _ |]
+			when sz = sz' && sz = sz'' && sz <= 64 ->
+			{ out_banks = [| 0 |] ;
+			  helpers = [||] ;
+			  emitter = (fun proc g ->
+			  	(if sz <= 32 then emit_ADDU else emit_DADDU)
+			  		proc.buffer (reg_of (g ">0")) (reg_of (g "<1")) (reg_of (g "<2"))) }
 		| _ -> raise Not_found
 
 	let mul_rshift = function
-		| 1, [| Reg (0, sz) ; Reg (0, sz') ; Cst shift |], [| sz'' |]
-			when sz = sz' && sz <= 32 && sz'' <= 32 && shift <= 31 -> {
-			scratch = [||] ; perm = [||] ; out_banks = [| 0 |] ;
-			preamble_emitter = no_preamble ;
-			emitter = (fun proc ins _scratch outs ->
-				(if sz <= 32 && sz'' <= 32 then emit_MULTUG else emit_DMULTUG)
-					proc.buffer (reg_of outs.(0)) (reg_of ins.(0)) (reg_of ins.(1)) ;
-				let shift = const_of ins.(2) in
-				if shift > 0 then emit_SRL proc.buffer (reg_of outs.(0)) (reg_of outs.(0)) shift) } 
+		| 1, [| Reg (0, (sz, sign)) ; Reg (0, (sz', sign')) ; Cst shift |], [| (sz'', sign'') |]
+			when sz = sz' && sz <= 64 && sz'' <= 64
+				&& sign = sign' && sign = sign''
+				&& shift <= sz -> {
+			out_banks = [| 0 |] ;
+			helpers = [||] ;
+			emitter = (fun proc g ->
+				(if sz <= 32 && sz'' <= 32 then (
+					if sign = Signed then emit_MULTG else emit_MULTUG
+				) else (
+					if sign = Signed then emit_DMULTG else emit_DMULTUG
+				)) proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) (reg_of (g "<1")) ;
+				let shift = int_const_of (g "<2") in
+				if shift > 0 then (
+					(if sz > 32 then emit_DSRL else emit_SRL)
+						proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) shift)) } 
 		| _ -> raise Not_found
 
 	let pack565 = function
-		| 1, [| Reg (0, 8) ; Reg (0, 8) ; Reg (0, 8) |], [| 16 |] ->
-			{ scratch = [| 1 |] ; perm = [||] ; out_banks = [| 0 |] ;
-			  preamble_emitter = no_preamble ;
-			  emitter = (fun proc ins scratch outs ->
-			  	emit_ANDI proc.buffer (reg_of outs.(0)) (reg_of ins.(0)) 0xf8 ; (* R *)
-				emit_SLL  proc.buffer (reg_of outs.(0)) (reg_of outs.(0)) 8 ;
-				emit_ANDI proc.buffer (reg_of scratch.(0)) (reg_of ins.(1)) 0xfc ; (* G *)
-				emit_SLL  proc.buffer (reg_of scratch.(0)) (reg_of scratch.(0)) 3 ;
-				emit_OR   proc.buffer (reg_of outs.(0)) (reg_of outs.(0)) (reg_of scratch.(0)) ;
-				emit_SRL  proc.buffer (reg_of scratch.(0)) (reg_of ins.(2)) 3 ; (* B *)
-				emit_OR   proc.buffer (reg_of outs.(0)) (reg_of outs.(0)) (reg_of scratch.(0))) }
+		| 1, [| Reg (0, (8, _)) ; Reg (0, (8, _)) ; Reg (0, (8, _)) |], [| 16, _ |] ->
+			let scratch = make_unique "scratch_565" in
+			{ out_banks = [| 0 |] ;
+			  helpers = [| 0, scratch, None |] ;
+			  emitter = (fun proc g ->
+			  	emit_ANDI proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) 0xf8 ; (* R *)
+				emit_SLL  proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) 8 ;
+				emit_ANDI proc.buffer (reg_of (g scratch)) (reg_of (g "<1")) 0xfc ; (* G *)
+				emit_SLL  proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) 3 ;
+				emit_OR   proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g scratch)) ;
+				emit_SRL  proc.buffer (reg_of (g scratch)) (reg_of (g "<2")) 3 ; (* B *)
+				emit_OR   proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g scratch))) }
 		| _ -> raise Not_found
 
 	let unpack565 = function
-		| 1, [| Reg (0, 16) |], [| 8 ; 8 ; 8 |] ->
-			{ scratch = [||] ; perm = [||] ; out_banks = [| 0 ; 0 ; 0 |] ;
-			  preamble_emitter = no_preamble ;
-			  emitter = (fun proc ins _scratch outs ->
-			  emit_SRL  proc.buffer (reg_of outs.(0)) (reg_of ins.(0)) 8 ; (* R *)
-			  emit_SRL  proc.buffer (reg_of outs.(1)) (reg_of ins.(0)) 3 ; (* G *)
-			  emit_SLL  proc.buffer (reg_of outs.(2)) (reg_of ins.(0)) 3 ; (* B *)
-			  emit_ANDI proc.buffer (reg_of outs.(0)) (reg_of outs.(0)) 0xf8 ;
-			  emit_ANDI proc.buffer (reg_of outs.(1)) (reg_of outs.(1)) 0xfc ;
-			  emit_ANDI proc.buffer (reg_of outs.(2)) (reg_of outs.(2)) 0xff) }
-		| _ -> raise Not_found
-
-	let var_read = function
-		| 1, [| Reg (0, 32) |], [| sz |] when sz <= 64 -> {
-			scratch = [||] ; perm = [||] ; out_banks = [| 0 |] ;
-			preamble_emitter = no_preamble ;
-			emitter = (fun proc ins _scratch outs ->
-				(if sz <= 8 then emit_LBU
-				 else if sz <= 16 then emit_LHU
-				 else if sz <= 32 then emit_LWU
-				 else emit_LD)
-					proc.buffer (reg_of outs.(0)) (reg_of ins.(0)) 0) }
-		| _ -> raise Not_found
-
-	let var_write = function
-		| 1, [| Reg (0, 32) ; Reg (0, sz) |], [||] when sz <= 64 -> {
-			scratch = [||] ; perm = [||] ; out_banks = [||] ;
-			preamble_emitter = no_preamble ;
-			emitter = (fun proc ins _scratch _outs ->
-				(if sz <= 8 then emit_SB
-				 else if sz <= 16 then emit_SH
-				 else if sz <= 32 then emit_SW
-				 else emit_SD)
-				 	proc.buffer (reg_of ins.(1)) (reg_of ins.(0)) 0) }
+		| 1, [| Reg (0, (16, _)) |], [| 8, Unsigned ; 8, Unsigned ; 8, Unsigned |] ->
+			{ out_banks = [| 0 ; 0 ; 0 |] ;
+			  helpers = [||] ;
+			  emitter = (fun proc g ->
+			  	emit_SRL  proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) 8 ; (* R *)
+			  	emit_SRL  proc.buffer (reg_of (g ">1")) (reg_of (g "<0")) 3 ; (* G *)
+			  	emit_SLL  proc.buffer (reg_of (g ">2")) (reg_of (g "<0")) 3 ; (* B *)
+			  	emit_ANDI proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) 0xf8 ;
+			  	emit_ANDI proc.buffer (reg_of (g ">1")) (reg_of (g ">1")) 0xfc ;
+			  	emit_ANDI proc.buffer (reg_of (g ">2")) (reg_of (g ">2")) 0xff) }
 		| _ -> raise Not_found
 
 	let stream_read = function
-		| 1, [| Reg (0, 32) |], [| 64 |] -> {
-			scratch = [| 1 |] ; perm = [||] ; out_banks = [| 0 |] ;
-			preamble_emitter = no_preamble ;
-			emitter = (fun proc ins scratch outs ->
-				emit_SLL proc.buffer (reg_of scratch.(0)) proc.clock_reg 3 ;
-				emit_ADDU proc.buffer (reg_of scratch.(0)) (reg_of scratch.(0)) (reg_of ins.(0)) ;
-				emit_LD proc.buffer (reg_of outs.(0)) (reg_of scratch.(0)) 0) }
-		| 1, [| Reg (0, 32) |], [| 32 |] -> {
-			scratch = [| 1 |] ; perm = [||] ; out_banks = [| 0 |] ;
-			preamble_emitter = no_preamble ;
-			emitter = (fun proc ins scratch outs ->
-				emit_SLL proc.buffer (reg_of scratch.(0)) proc.clock_reg 2 ;
-				emit_ADDU proc.buffer (reg_of scratch.(0)) (reg_of scratch.(0)) (reg_of ins.(0)) ;
-				emit_LWU proc.buffer (reg_of outs.(0)) (reg_of scratch.(0)) 0) }
-		| 1, [| Reg (0, 32) |], [| 16 |] -> {
-			scratch = [| 1 |] ; perm = [||] ; out_banks = [| 0 |] ;
-			preamble_emitter = no_preamble ;
-			emitter = (fun proc ins scratch outs ->
-				emit_ADDU proc.buffer (reg_of scratch.(0)) proc.clock_reg proc.clock_reg ;
-				emit_ADDU proc.buffer (reg_of scratch.(0)) (reg_of scratch.(0)) (reg_of ins.(0)) ;
-				emit_LHU proc.buffer (reg_of outs.(0)) (reg_of scratch.(0)) 0) }
-		| 1, [| Reg (0, 32) |], [| 8 |] -> {
-			scratch = [| 1 |] ; perm = [||] ; out_banks = [| 0 |] ;
-			preamble_emitter = no_preamble ;
-			emitter = (fun proc ins scratch outs ->
-				emit_ADDU proc.buffer (reg_of scratch.(0)) proc.clock_reg (reg_of ins.(0)) ;
-				emit_LBU proc.buffer (reg_of outs.(0)) (reg_of scratch.(0)) 0) }
+		| 1, [| Reg (0, (32, Unsigned)) |], [| 64, _ |] ->
+			let scratch = make_unique "scratch_read" in
+			{ out_banks = [| 0 |] ;
+			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  emitter = (fun proc g ->
+			  	emit_SLL  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) 3 ;
+			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g "<0")) ;
+			  	emit_LD   proc.buffer (reg_of (g ">0")) (reg_of (g scratch)) 0) }
+		| 1, [| Reg (0, (32, Unsigned)) |], [| 32, sign |] ->
+			let scratch = make_unique "scratch_read" in
+			{ out_banks = [| 0 |] ;
+			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  emitter = (fun proc g ->
+			  	emit_SLL  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) 2 ;
+			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g "<0")) ;
+			  	(if sign = Signed then emit_LW else emit_LWU)
+					proc.buffer (reg_of (g ">0")) (reg_of (g scratch)) 0) }
+		| 1, [| Reg (0, (32, Unsigned)) |], [| 16, sign |] ->
+			let scratch = make_unique "scratch_read" in
+			{ out_banks = [| 0 |] ;
+			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  emitter = (fun proc g ->
+			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "clock")) ;
+			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g "<0")) ;
+			  	(if sign = Signed then emit_LH else emit_LHU)
+					proc.buffer (reg_of (g ">0")) (reg_of (g scratch)) 0) }
+		| 1, [| Reg (0, (32, Unsigned)) |], [| 8, sign |] ->
+			let scratch = make_unique "scratch_read" in
+			{ out_banks = [| 0 |] ;
+			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  emitter = (fun proc g ->
+			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "<0")) ;
+			  	(if sign = Signed then emit_LB else emit_LBU)
+					proc.buffer (reg_of (g ">0")) (reg_of (g scratch)) 0) }
 		| _ -> raise Not_found
 
 	let stream_write = function
-		| 1, [| Reg (0, 32) ; Reg (0, 64) |], [||] -> {
-			scratch = [| 1 |] ; perm = [||] ; out_banks = [||] ;
-			preamble_emitter = no_preamble ;
-			emitter = (fun proc ins scratch _outs ->
-				emit_SLL proc.buffer (reg_of scratch.(0)) proc.clock_reg 3 ;
-				emit_ADDU proc.buffer (reg_of scratch.(0)) (reg_of scratch.(0)) (reg_of ins.(0)) ;
-				emit_SD proc.buffer (reg_of ins.(1)) (reg_of scratch.(0)) 0) }
-		| 1, [| Reg (0, 32) ; Reg (0, 32) |], [||] -> {
-			scratch = [| 1 |] ; perm = [||] ; out_banks = [||] ;
-			preamble_emitter = no_preamble ;
-			emitter = (fun proc ins scratch _outs ->
-				emit_SLL proc.buffer (reg_of scratch.(0)) proc.clock_reg 2 ;
-				emit_ADDU proc.buffer (reg_of scratch.(0)) (reg_of scratch.(0)) (reg_of ins.(0)) ;
-				emit_SW proc.buffer (reg_of ins.(1)) (reg_of scratch.(0)) 0) }
-		| 1, [| Reg (0, 32) ; Reg (0, 16) |], [||] -> {
-			scratch = [| 1 |] ; perm = [||] ; out_banks = [||] ;
-			preamble_emitter = no_preamble ;
-			emitter = (fun proc ins scratch _outs ->
-				emit_ADDU proc.buffer (reg_of scratch.(0)) proc.clock_reg proc.clock_reg ;
-				emit_ADDU proc.buffer (reg_of scratch.(0)) (reg_of scratch.(0)) (reg_of ins.(0)) ;
-				emit_SH proc.buffer (reg_of ins.(1)) (reg_of scratch.(0)) 0) }
-		| 1, [| Reg (0, 32) ; Reg (0, 8) |], [||] -> {
-			scratch = [| 1 |] ; perm = [||] ; out_banks = [||] ;
-			preamble_emitter = no_preamble ;
-			emitter = (fun proc ins scratch _outs ->
-				emit_ADDU proc.buffer (reg_of scratch.(0)) proc.clock_reg (reg_of ins.(0)) ;
-				emit_SB proc.buffer (reg_of ins.(1)) (reg_of scratch.(0)) 0) }
+		| 1, [| Reg (0, (32, Unsigned)) ; Reg (0, (64, _)) |], [||] ->
+			let scratch = make_unique "scratch_write" in
+			{ out_banks = [||] ;
+			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  emitter = (fun proc g ->
+			  	emit_SLL  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) 3 ;
+			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g "<0")) ;
+			  	emit_SD   proc.buffer (reg_of (g "<1")) (reg_of (g scratch)) 0) }
+		| 1, [| Reg (0, (32, Unsigned)) ; Reg (0, (32, _)) |], [||] ->
+			let scratch = make_unique "scratch_write" in
+			{ out_banks = [||] ;
+			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  emitter = (fun proc g ->
+			  	emit_SLL  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) 2 ;
+			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g "<0")) ;
+			  	emit_SW   proc.buffer (reg_of (g "<1")) (reg_of (g scratch)) 0) }
+		| 1, [| Reg (0, (32, Unsigned)) ; Reg (0, (16, _)) |], [||] ->
+			let scratch = make_unique "scratch_write" in
+			{ out_banks = [||] ;
+			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  emitter = (fun proc g ->
+			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "clock")) ;
+			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g "<0")) ;
+			  	emit_SH   proc.buffer (reg_of (g "<1")) (reg_of (g scratch)) 0) }
+		| 1, [| Reg (0, (32, Unsigned)) ; Reg (0, (8, _)) |], [||] ->
+			let scratch = make_unique "scratch_write" in
+			{ out_banks = [||] ;
+			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  emitter = (fun proc g ->
+			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "<0")) ;
+			  	emit_SB   proc.buffer (reg_of (g "<1")) (reg_of (g scratch)) 0) }
 		| _ -> raise Not_found
 
 	let loop_head = function
-		| scale, [| Reg (1, 32) |], [||] ->
-			{ scratch = [| 1 |] ; perm = [||] ; out_banks = [||] ;
-			  preamble_emitter = no_preamble ;
-			  emitter = (fun proc ins scratch _outs ->
+		| scale, [| Reg (0, (32, Unsigned)) |], [||] ->
+			let scratch = make_unique "scratch_head" in
+			{ out_banks = [||] ;
+			  (* FIXME: the compiler don't know that we don't need the value of this scratch
+			   * register from one run to another, and as a result will keep the register for
+			   * the whole loop. *)
+			  helpers = [| 0, scratch, None ; clock_var |] ;
+			  emitter = (fun proc g ->
 			  	let loop_start = Codebuf.offset proc.buffer in
 			  	(* First test if clock + scale > width, and if so jump forward to quit label
 			  	 * then save loop label *)
-			  	emit_ADDIU proc.buffer (reg_of scratch.(0)) proc.clock_reg scale ;
-			  	emit_SUBU  proc.buffer (reg_of scratch.(0)) (reg_of ins.(0)) (reg_of scratch.(0)) ;
+			  	emit_ADDIU proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) scale ;
+			  	emit_SUBU  proc.buffer (reg_of (g scratch)) (reg_of (g "<0")) (reg_of (g scratch)) ;
 			  	proc.loops <- Some
 					{ start = loop_start ; blez = Codebuf.offset proc.buffer ; top = proc.loops } ;
-				emit_BLTZ  proc.buffer (reg_of scratch.(0)) 0; (* actual offset will be patched later *)
+				emit_BLTZ  proc.buffer (reg_of (g scratch)) 0; (* actual offset will be patched later *)
 				emit_NOP   proc.buffer) }
 		| _ -> raise Not_found
 
 	let loop_tail = function
 		| scale, [||], [||] ->
-			{ scratch = [||] ; perm = [||] ; out_banks = [||] ;
-			  preamble_emitter = no_preamble ;
-			  emitter = (fun proc _ins _scratch _outs ->
-			  let loop = unopt proc.loops in
-			  let offset = (loop.start - ((Codebuf.offset proc.buffer) + 4)) / 4 in
-			  Printf.printf "BEQ to %d, from %d to %d\n" offset ((Codebuf.offset proc.buffer) + 8) loop.start ;
-			  emit_BEQ   proc.buffer 0 0 offset ;
-			  emit_ADDIU proc.buffer proc.clock_reg proc.clock_reg scale ;
-			  patch_imm  proc.buffer loop.blez (((Codebuf.offset proc.buffer) - (loop.blez + 4)) / 4) ;
-			  proc.loops <- loop.top) }
+			{ out_banks = [||] ;
+			  helpers = [| clock_var |] ;
+			  emitter = (fun proc g ->
+			  	let loop = unopt proc.loops in
+			  	let offset = (loop.start - ((Codebuf.offset proc.buffer) + 4)) / 4 in
+			  	Printf.printf "BEQ to %d, from %d to %d\n" offset ((Codebuf.offset proc.buffer) + 8) loop.start ;
+			  	emit_BEQ   proc.buffer 0 0 offset ;
+			  	emit_ADDIU proc.buffer (reg_of (g "clock")) (reg_of (g "clock")) scale ;
+			  	patch_imm  proc.buffer loop.blez (((Codebuf.offset proc.buffer) - (loop.blez + 4)) / 4) ;
+			  	proc.loops <- loop.top) }
 		| _ -> raise Not_found
 
-	(* This one is special. It's emitted before the loop just after entry_point to load all
-	 * function parameters into registers.
-	 * With regards to the plan, it has no inputs and as many outputs as used parameters. *)
-	let load_params (scale, ins, outs) =
-		assert (ins = [||]) ;
-		ignore scale ;	(* For constants, load them scale times ? *)
-		{
-			scratch = [||] ; perm = [| 1 |] ; out_banks = Array.make (Array.length outs) 0 ;
-			(* We use a perm register as the clock source for our loops. *)
-			preamble_emitter = (fun proc perms ->
-				proc.clock_reg <- (reg_of perms.(0)) ;
-				Printf.printf "Using $%d as clock_reg\n" proc.clock_reg ;
-				emit_DADDU proc.buffer proc.clock_reg 0 0) ;
-			(* FIXME: if we have no constant but only registers, do this ;
-			 * otherwise code must init regs with constant as well. *)
-			emitter = (fun proc _ins _scratch outs ->
-				(* Load parameters into allocated registers *)
-				Array.iteri (fun i r -> emit_LD proc.buffer (reg_of r) 29 (8 * i)) outs) }
+	let load_param (scale, ins, outs) =
+		assert (Array.length ins = 1) ;
+		assert (Array.length outs = 1) ;
+		ignore scale ;
+		{ out_banks = [| 0 |] ;
+		  helpers = [||] ;
+		  emitter = (fun proc g ->
+		  	emit_LD proc.buffer (reg_of (g ">0")) 29 (8 * (int_const_of (g "<0")))) }
 
 	(* Returns the context used by emitters. *)
 	let make_proc _nb_sources =
 		{ buffer = Codebuf.make 1024 "/tmp/test.code" ;
 		  loops = None ;
-		  clock_reg = 0 ;
 		  params = [||] ;
 		  frame_size = 0 ;
 		  callee_saved = [] }
@@ -383,12 +388,12 @@ struct
 		(* Callee-saved registers and return address, that we are going to save
 		 * if we use them. *)
 		let is_callee_saved = function
-			| Reg (0, _) as r -> (match (reg_of r) with
+			| 0, r -> (match reg_of (Vreg (0, r)) with
 				| 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 28 | 30 -> true
 				(* return address is not really a callee saved reg, but we will treat it the same *)
 				| 31 -> true
 				| _ -> false)
-			| Reg (1, _) as r -> let r = reg_of r in r >= 20 && r <= 31
+			| 1, r -> let r = reg_of (Vreg (1, r)) in r >= 20 && r <= 31
 			| _ -> failwith "Register is not a Reg" in
 		(* These are used to store function arguments.
 		 * We save them on the stack since we pretend these registers are available *)
@@ -398,7 +403,7 @@ struct
 		 * callee-saved registers. *)
 		proc.frame_size <- (Array.length arg_regs) * 8 ;
 		proc.callee_saved <- [] ;
-		Hashtbl.iter (fun r _ ->
+		List.iter (fun r ->
 			if is_callee_saved r then (
 				(proc.callee_saved <- (proc.frame_size, r) :: proc.callee_saved ;
 				proc.frame_size <- proc.frame_size + 8))) used_regs ;
@@ -406,20 +411,20 @@ struct
 		(* Save all registers used to pass arguments on top of this frame,
 		 * so that we can later easily retrieve them. *)
 		let save_reg offset r =
-			Printf.printf "Saving register %s at offset %d\n" (spec_in_name r) proc.frame_size ;
+			Printf.printf "Saving register %s at offset %d\n" (string_of_reg_id r) proc.frame_size ;
 			match r with
-				| Reg (0, _) -> emit_SD proc.buffer (reg_of r) 29 offset
-				| Reg (1, _) -> emit_SDC 1 proc.buffer (reg_of r) 29 offset
+				| 0, _ -> emit_SD proc.buffer (reg_of (Vreg r)) 29 offset
+				| 1, _ -> emit_SDC 1 proc.buffer (reg_of (Vreg r)) 29 offset
 				| _ -> failwith "Saved reg is not a Reg" in
-		Array.iteri (fun i r -> save_reg (i*8) (Reg (0, r))) arg_regs ;
+		Array.iteri (fun i r -> save_reg (i*8) (0, r)) arg_regs ;
 		(* Save the callee saved registers that we are going to use *)
 		List.iter (fun (offset, r) -> save_reg offset r) proc.callee_saved
 
 	let emit_exit proc =
 		(* Restore r31 and other callee-saved registers that were saved on the stack. *)
 		let restore_reg offset r = match r with
-			| Reg (0, _) -> emit_LD proc.buffer (reg_of r) 29 offset
-			| Reg (1, _) -> emit_LDC 1 proc.buffer (reg_of r) 29 offset
+			| 0, _ -> emit_LD proc.buffer (reg_of (Vreg r)) 29 offset
+			| 1, _ -> emit_LDC 1 proc.buffer (reg_of (Vreg r)) 29 offset
 			| _ -> failwith "Restored reg is not a Reg" in
 		List.iter (fun (offset, r) -> restore_reg offset r) proc.callee_saved ;
 		(* Restore stack pointer and return to caller *)

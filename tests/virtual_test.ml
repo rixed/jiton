@@ -19,16 +19,17 @@ struct
 
 	let () =
 		let program = [|
-			Impl.stream_read, [| "pixels" |], [| "pixel", 16 |] ;
-			Impl.unpack565, [| "pixel" |], [| "r", 8 ; "g", 8 ; "b", 8 |] ;
-			Impl.stream_read, [| "alpha" |], [| "a", 8 |] ;
-			Impl.mul_rshift, [| "r" ; "a" ; "8" |], [| "r'", 8 |] ;
-			Impl.mul_rshift, [| "g" ; "a" ; "8" |], [| "g'", 8 |] ;
-			Impl.mul_rshift, [| "b" ; "a" ; "8" |], [| "b'", 8 |] ;
-			Impl.pack565, [| "r'" ; "g'" ; "b'" |], [| "pixel'", 16 |] ;
+			Impl.stream_read, [| "pixels" |], [| "pixel", (16, Unsigned) |] ;
+			Impl.unpack565, [| "pixel" |], [| "r", (8, Unsigned) ; "g", (8, Unsigned) ; "b", (8, Unsigned) |] ;
+			Impl.stream_read, [| "alpha" |], [| "a", (8, Unsigned) |] ;
+			Impl.mul_rshift, [| "r" ; "a" ; "8" |], [| "r'", (8, Unsigned) |] ;
+			Impl.mul_rshift, [| "g" ; "a" ; "8" |], [| "g'", (8, Unsigned) |] ;
+			Impl.mul_rshift, [| "b" ; "a" ; "8" |], [| "b'", (8, Unsigned) |] ;
+			Impl.pack565, [| "r'" ; "g'" ; "b'" |], [| "pixel'", (16, Unsigned) |] ;
 			Impl.stream_write, [| "image" ; "pixel'" |], [||] |] in
-		let program_params = [| "width", 32 ; "pixels", 32 ; "alpha", 32 ; "image", 32 |] in
+		let program_params = [| "width", (32, Unsigned) ; "pixels", (32, Unsigned) ; "alpha", (32, Unsigned) ; "image", (32, Unsigned) |] in
 		let procedure = Compiler.compile program program_params in
+		Printf.printf "%!" ; (* prepare for the coming segfault :-> *)
 		(* Test it on some inputs *)
 		let nb_pixels = 2 in
 		let pixels = Array1.create int16_unsigned c_layout 2 in
@@ -47,6 +48,6 @@ struct
 
 end
 
-(*module Test1 = Test (Impl_virtual.Virtual)*)
+module Test1 = Test (Impl_virtual.Virtual)
 module Test2 = Test (Impl_loongson.Loongson)
 

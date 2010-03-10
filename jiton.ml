@@ -17,34 +17,43 @@
  * First we give meaningful names to various basic types we use often :
  *)
 
-(* By "type" what we actually mean is "bit size" *)
-type data_type = int
+(* By "type" what we actually mean is bit size and (un)signed mode *)
+type data_size = int
+type sign_kind = Signed | Unsigned (* TODO: use a boolean ? *)
+type data_type = data_size * sign_kind
 
 (* We may have distinct "bank" of registers
  * (typically, general purpose registers and (larger) SIMD registers.
  * Function parameters comes in registers of bank 0 *)
-type bank_num = int	
+type bank_num = int
 
 (* Registers are identified by number *)
 type reg_num = int
 
-(* How many actions are performed by an operation implementation *)
+type reg_id = bank_num * reg_num
+
+(* How many parallel actions are performed by an operation implementation *)
 type scale = int
 
-(* Used to specify inputs and outputs of the operations.
- * ALSO USED FOR PASSING ACTUAL VALUES TO CODE EMITTERS !
- * In this case, data_type is reg number, constant value or auto storage location !
- * Auto is for automatic storage (typically, stack) *)
+(* Used to specify inputs of the operations. *)
 type spec_in =
 	| Reg of (bank_num * data_type)
-	| Cst of data_type
-	| Auto of data_type
+	| Cst of data_size
 
 (* Used to specify expected outputs *)
 type spec_out = data_type
 
-(* When the implementation have no preamble to emit *)
-let no_preamble _ _ = ()
+(*
+ * Some helpers implementors might find convenient
+ *)
+
+(* When you want a scratch registers that are never shared amongst several operations : *)
+let make_unique =
+	let serial = ref 0 in
+	fun name ->
+		let res = name ^ "." ^ (string_of_int !serial) in
+		incr serial ;
+		res
 
 (*
  * An implementer provides code emitters for an architecture
@@ -60,6 +69,7 @@ sig
 	 * nativeint since one may want to cross-compile. *)
 	type word
 	val word_of_int : int -> word
+	val word_of_string : string -> word
 
 	(* But then, if you plan to execute it we want to be able to convert
 	 * it to nativeint. *)
@@ -71,46 +81,46 @@ sig
 	(* Returns an empty proc *)
 	val make_proc : int (* number of parameters *) -> proc
 
+	(* Before proceeding to operation implementations, the implementer must
+	 * provide code emitter for performing some special tasks : *)
+	
+	(* Emit code to reserve and initialize some storage for extra values.
+	 * Note that for auto storage of param value, no extra storage may be
+	 * needed (if procedure parameters are already on the stack) *)
+	type initer = Param of int | Const of word
+	val emit_entry_point : proc -> initer array -> reg_id list -> unit
+
+	(* Emit code to exit the procedure (and clear auto storage) *)
+	val emit_exit : proc -> unit
+
+	(* The getter for symbols returns this : *)
+	type val_id =
+		| Vreg of reg_id
+		| Vcst of word
+
+	type emitter = proc -> (string -> val_id) -> unit
+
 	(* An operation implementation *)
 	type op_impl =
-		{ scratch : int array ;	(* number of scratch registers needed per bank *)
-		  perm : int array ;	(* number of permanently assigned registers needed *)
-		  out_banks : bank_num array ;	(* in which banks the output are assigned *)
-		  (* This code will be placed before the main loop and can be used to init perm regs *)
-		  preamble_emitter : proc -> spec_in array (* perm regs *) -> unit ;
-		  (* This code perform the operation in the main loop *)
-		  emitter : proc ->
-		  	spec_in array (* input regs *) ->
-		  	spec_in array (* scratch regs *) ->
-		  	spec_in array (* output regs *) ->
-		  	unit }
+		{ helpers : (bank_num * string * emitter option) array ;
+		  out_banks : bank_num array ;	(* to which banks the outputs are assigned *)
+		  (* This code performs the operation in the main loop *)
+		  emitter : emitter }
 	
 	(* Look for an implementation satisfying given specifications. *)
 	type impl_lookup = scale * spec_in array * spec_out array -> op_impl
 
 	(* Operations supported. *)
-	val var_read : impl_lookup
-	val var_write : impl_lookup
-	val stream_read : impl_lookup
-	val stream_write : impl_lookup
 	val loop_head : impl_lookup
 	val loop_tail : impl_lookup
-	val load_params : impl_lookup
-	val add : impl_lookup
+	(* Takes a constant N as only input and outputs a value equal to
+	 * the Nth parameter of the function : *)
+	val load_param : impl_lookup
+	val stream_read : impl_lookup
+	val stream_write : impl_lookup
 	val mul_rshift : impl_lookup
 	val pack565 : impl_lookup
 	val unpack565 : impl_lookup
-
-	(* What to initialize auto storage with *)
-	type initer = Param of int | Const of word
-
-	(* Emit code to reserve and initialize some storage for extra values
-	 * Note that for auto storage of param value, no extra storage may be
-	 * needed (if procedure parameters are already on the stack) *)
-	val emit_entry_point : proc -> initer array -> (spec_in, bool) Hashtbl.t -> unit
-
-	(* Emit code to exit the procedure (and clear auto storage) *)
-	val emit_exit : proc -> unit
 
 	(* Run the given procedure with these parameters.
 	 * If your parameters are bigarray, use the convertion function address_of_bigarray below. *)

@@ -1,5 +1,14 @@
 open Jiton
 
+let hashtbl_keys h =
+	Hashtbl.fold (fun k _ prevs -> k :: prevs) h []
+
+let bitsize_of cst =
+	let rec aux size max_cst =
+		if cst < max_cst then size
+		else aux (size+1) (max_cst lsl 1) in
+	aux 0 1
+
 module Compiler (Impl_: IMPLEMENTER)
 	: COMPILER with module Impl = Impl_ =
 struct
@@ -15,58 +24,73 @@ struct
 	 *)
 	
 	(* Before proceeding to register allocation we choose the implementations for each
-	 * program_step and build a prealloc_plan *)
-	type prealloc_plan_step =
-		{ prealloc_impl : Impl.op_impl ;
+	 * program_step and build a plan *)
+	type plan_step_kind = Loop_body | Loop_head | Loop_tail
+	type plan_step =
+		{ impl : Impl.op_impl ;
+		  kind : plan_step_kind ;
 		  input_names : string array ;
 		  output_names : string array }
-	type prealloc_plan = prealloc_plan_step array
+	type plan = plan_step array
 
-	(* This phase required to track user symbols *)
-	type user_sym = string * data_type
-	type user_op = Impl.impl_lookup * string array * user_sym array
-	type user_plan = user_op array
-	type user_symbol = { mutable bank : int ; size : data_type }
+	(* This phase requires to track user symbols *)
+	type user_symbol = { mutable bank : int ; data_type : data_type }
 
 	(* For debugging *)
+	let string_of_data_type (size, sign) =
+		let string_of_sign = function
+			| Signed -> "signed"
+			| Unsigned -> "unsigned" in
+		Printf.sprintf "%d bits, %s" size (string_of_sign sign)
 	let string_of_spec_in specs =
 		let string_of_spec = function
-			| Reg (bank, size) -> Printf.sprintf "Reg (bank=%d, size=%d)" bank size
-			| Cst size -> Printf.sprintf "Cst size=%d" size
-			| Auto size -> Printf.sprintf "Auto size=%d" size in
+			| Reg (bank, dtype) -> Printf.sprintf "Reg (bank=%d, dtype=%s)" bank (string_of_data_type dtype)
+			| Cst size -> Printf.sprintf "Cst size=%d" size in
 		(Array.fold_left (fun prefix spec -> prefix^(string_of_spec spec)^"; ") "[ " specs)^" ] "
 	let string_of_spec_out specs =
-		let string_of_spec spec = Printf.sprintf "size=%d" spec in
+		let string_of_spec dtype = Printf.sprintf "dtype=%s" (string_of_data_type dtype) in
 		(Array.fold_left (fun prefix spec -> prefix^(string_of_spec spec)^"; ") "[ " specs)^" ] "
+	let string_of_plan_kind = function
+		| Loop_head -> "HEAD"
+		| Loop_tail -> "tail"
+		| Loop_body -> "body"
+	let print_plan plan =
+		Array.iteri (fun i p ->
+			let print_names arr =
+				Array.iter (fun n -> Printf.printf "%s " n) arr in
+			Printf.printf "Plan[%d](%s) : " i (string_of_plan_kind p.kind) ;
+			print_names p.input_names ; Printf.printf " -> " ;
+			print_names p.output_names ; Printf.printf "\n") plan
 
-	(* From a "user program" giving only the main ingredients, build a preplan
+	(* From a "user program" giving only the main ingredients, build a plan
 	 * by cooking possible implementations, served with loop and procedure call machinery.
 	 *)
-	let make_preplan (user_plan : program) func_params =
+	let make_plan (program : program) func_params =
 		let func_param_names = Array.map fst func_params in
-		let func_param_sizes = Array.map snd func_params in
-		(* Returns a path of larger allowed scale.
-		 * A "path" is a prealloc_plan for the loop body (ie user_plan). *)
+		let func_param_dtypes = Array.map snd func_params in
+		(* Returns a path of largest allowed scale.
+		 * A "path" is a plan for the loop body only. *)
 		let make_path min_scale max_scale =
 			let find_path scale =
 				Printf.printf "Looking for path of scale %d.\n" scale ;
-				(* Build a symbol table giving the expected size and register bank of symbols. *)
+				(* Build a symbol table giving the expected type and register bank of symbols. *)
 				let symbols = Hashtbl.create 10 in
 				(* Symbols are known from function parameters and later output variables. *)
-				let add_symbol name size bank =
-					Printf.printf "Add symbol %s, bank=%d, size=%d.\n" name bank size ;
-					Hashtbl.add symbols name { bank = bank ; size = size } in
-				let add_symbols bank = Array.iter (fun (name, size) -> add_symbol name size bank) in
+				let add_symbol name dtype bank =
+					Printf.printf "Add symbol %s, bank=%d, type=%s.\n"
+						name bank (string_of_data_type dtype) ;
+					Hashtbl.add symbols name { bank = bank ; data_type = dtype } in
+				let add_symbols bank = Array.iter (fun (name, dtype) -> add_symbol name dtype bank) in
 				add_symbols 0 func_params ;
 				Array.map (fun (impl_lookup, inputs, outputs) ->
 					(* Build input and output specifier. *)
 					let specs_in = Array.map (fun sym_name ->
 						(* Is it a constant ? *)
-						try Cst (int_of_string sym_name)
+						try Cst (bitsize_of (int_of_string sym_name))
 						with Failure _ -> (	(* Or get info from the symbol table. *)
 							let symbol = Hashtbl.find symbols sym_name in
-							Reg (symbol.bank, symbol.size))) inputs in
-					let specs_out = Array.map (fun (_, sym_size) -> sym_size) outputs in
+							Reg (symbol.bank, symbol.data_type))) inputs in
+					let specs_out = Array.map snd outputs in
 					(* If we can't find it, we could still achieve the same result by repeating scale
 					 * times the implementation for scale=1. *)
 					Printf.printf "\tLooking for an impl @scale=%d, for specs = %s -> %s.\n" scale (string_of_spec_in specs_in) (string_of_spec_out specs_out) ;
@@ -74,31 +98,74 @@ struct
 					Printf.printf "\tfound an impl giving %d outputs.\n" (Array.length impl.Impl.out_banks) ;
 					assert ((Array.length impl.Impl.out_banks) = (Array.length outputs)) ;
 					(* Add new symbols for outputs. *)
-					Array.iteri (fun i (name, size) ->
-						add_symbol name size impl.Impl.out_banks.(i)) outputs ;
+					Array.iteri (fun i (name, dtype) ->
+						add_symbol name dtype impl.Impl.out_banks.(i)) outputs ;
 					(* Returns the prealloc_plan. *)
-					{	prealloc_impl = impl ;
-						input_names = inputs ;
-						output_names = Array.map fst outputs }) user_plan in
+					{ impl = impl ; kind = Loop_body ;
+					  input_names = inputs ;
+					  output_names = Array.map fst outputs }) program in
 			let rec aux scale =
 				if scale < min_scale then raise Not_found
 				else try (find_path scale), scale with Not_found -> (
 					Printf.printf "No path for scale %d.\n" scale ;
 					aux (scale - 1)) in
 			aux max_scale in
-		let preplan_of_path path =
-			(* Merely add entry/exit points and loop head/tail. *)
-			let preplan = Array.concat [
-				[|	{	prealloc_impl = Impl.load_params (1, [||], func_param_sizes) ;
-						input_names = [||] ; output_names = func_param_names } ;
-					{	prealloc_impl = Impl.loop_head (1, [| Reg (1, 32) |], [||]) ;
-						input_names = [| "width" |] ; output_names = [||] } |] ;
-				path ;
-				[|	{	prealloc_impl = Impl.loop_tail (1, [||], [||]) ;
-						input_names = [||] ; output_names = [||] } |] ] in
-			let loops = [ 1, (Array.length preplan)-1 ] in
-			preplan, loops in
-		let path_with_renamed_vars suffix path =
+		(* Add func parameters loading into registers *)
+		let load_params =
+			let loader n =
+				{ impl = Impl.load_param (1, [| Cst (bitsize_of n) |], [| func_param_dtypes.(n) |]) ;
+				  kind = Loop_body ;
+				  input_names = [| string_of_int n |] ;
+				  output_names = [| func_param_names.(n) |] } in
+			Array.mapi (fun n _dtype -> loader n) func_param_dtypes in
+		(* Given a path, expand inline helper emitters, add loop_head/tail and
+		 * invariant emitters. *)
+		let helper_expanded = Hashtbl.create 10 in
+		let loop_of_path path scale =
+			let expand_plan prev_plan prog_step =
+				let { impl=impl; input_names=inputs } = prog_step in
+				(* Add helpers to inputs *)
+				let add_inputs = ref [] in
+				(* Add outputing steps in invariants or inline, if not already done. *)
+				let add_invariant = ref [] in
+				let add_inline = ref [] in
+				Array.iter (fun (bank, name, emitter_opt) ->
+					add_inputs := name :: !add_inputs ;
+					if not (Hashtbl.mem helper_expanded name) then (
+						Hashtbl.add helper_expanded name true ;
+						match emitter_opt with
+							| None -> (* inline dummy outputer *)
+								add_inline :=
+									{ impl = { Impl.out_banks = [| bank |] ;
+									           Impl.helpers = [||] ;
+									           Impl.emitter = (fun _ _ -> ()) } ;
+									  input_names = [||] ; output_names = [| name |] ;
+									  kind = Loop_body } :: !add_inline
+							| Some invariant ->
+								add_invariant :=
+									{ impl = { Impl.out_banks = [| bank |] ;
+									           Impl.helpers = [||] ;
+									           Impl.emitter = invariant } ;
+									  input_names = [||] ; output_names = [| name |] ;
+									  kind = Loop_body } :: !add_invariant))
+					impl.Impl.helpers ;
+				let new_step =
+					{ prog_step with
+					  input_names = Array.concat [ inputs ; Array.of_list !add_inputs ] } in
+				!add_invariant @ prev_plan @ !add_inline @ [new_step] in
+			let loop_head =
+				(* TODO: here the first param is assumed to be the length of the loop... *)
+				{ impl = Impl.loop_head (scale, [| Reg (0, func_param_dtypes.(0)) |], [||]) ;
+				  input_names = [| func_param_names.(0) |] ; output_names = [||] ;
+				  kind = Loop_head } in
+			let loop_tail =
+				{ impl = Impl.loop_tail (scale, [||], [||]) ;
+				  input_names = [||] ; output_names = [||] ;
+				  kind = Loop_tail } in
+			let new_plan = Array.concat [ [|loop_head|] ; path ; [|loop_tail|] ] in
+			let plan_list = Array.fold_left expand_plan [] new_plan in
+			Array.of_list plan_list in
+		let rename_vars suffix plan =
 			let array_exits arr e =
 				try (
 					Array.iter (fun e' -> if e = e' then raise Exit) arr ;
@@ -110,25 +177,16 @@ struct
 			Array.map (fun p ->
 				{	p with
 					input_names  = (renamed p.input_names) ;
-					output_names = (renamed p.output_names) }) path in
+					output_names = (renamed p.output_names) }) plan in
+		let plan_of_path path =
+			Array.concat [ load_params ; loop_of_path path 1 ] in
 		let combine_paths slow_path fast_path scale =
 			(* FIXME: we do not take into account data alignment here. but how can we ? *)
-			let preplan = Array.concat [
-				[|	{	prealloc_impl = Impl.load_params (scale, [||], func_param_sizes) ;
-						input_names = [||] ; output_names = func_param_names } ;
-					{	prealloc_impl = Impl.loop_head (scale, [| Reg (1, 32) |], [||]) ;
-						input_names = [| "width" |] ; output_names = [||] } |] ;
-				path_with_renamed_vars "[fast]" fast_path ;
-				[|	{	prealloc_impl = Impl.loop_tail (scale, [||], [||]) ;
-						input_names = [||] ; output_names = [||] } ;
-					{	prealloc_impl = Impl.loop_head (1, [| Reg (1, 32) |], [||]) ;
-						input_names = [| "width" |] ; output_names = [||] } |] ;
-				path_with_renamed_vars "[slow_finish]" slow_path ;
-				[|	{	prealloc_impl = Impl.loop_tail (1, [||], [||]) ;
-						input_names = [||] ; output_names = [||] } |] ] in
-			let loop_tail_1 = Array.length fast_path + 2 in
-			let loops = [ 1, loop_tail_1 ; loop_tail_1 + 1, (Array.length preplan)-1 ] in
-			preplan, loops in
+			(* We must force order of evalutation to have invariants outputed in front of the
+			 * first loop. *)
+			let fast_loop = loop_of_path (rename_vars "[fast]" fast_path) scale
+			and slow_loop = loop_of_path (rename_vars "[slow_finish]" slow_path) 1 in
+			Array.concat [ load_params ; fast_loop ; slow_loop ] in
 		(* First, build the slow path (1 item at a time) *)
 		let slow_path, _ = make_path 1 1 in
 		(* Then look for a fast path (N items at a time) *)
@@ -138,7 +196,7 @@ struct
 			combine_paths slow_path fast_path scale
 		) with Not_found -> (
 			(* Or using only the slow path if no fast path was found. *)
-			preplan_of_path slow_path
+			plan_of_path slow_path
 		)
 
 	(*
@@ -154,20 +212,11 @@ struct
 		  mutable alloc_bank : bank_num ;
 		  mutable alloc_reg : reg_num }
 	
-	(* The final plan with registers affected to symbols *)
-	type plan_step =
-		{ impl : Impl.op_impl ;
-		  perm_regs : spec_in array ;
-		  mutable in_regs : spec_in array ;
-		  scratch_regs : spec_in  array ;
-		  out_regs : spec_in array }
-	type plan = plan_step array
-
-	(* For this to work, the first step of the plan must be the entry point, taking
-	 * no input and outputing all the function parameters as var_regs.
-	 * We also need to know where the loops are located. *)
-	let reg_allocation preplan loops =
+	(* Build the getter function (ie. the symbol table, functional style). *)
+	let reg_allocation plan =
 		let used_regs = Hashtbl.create 10 in
+		let nb_banks  = Array.length Impl.register_sets in
+
 		(* Build symbol table. *)
 		Printf.printf "Build symbol table.\n" ;
 		let symbols = Hashtbl.create 10 in
@@ -176,10 +225,10 @@ struct
 				(* sym_name may be an integer constant *)
 				(* FIXME: Ocaml's integers are not great for constants, word would be better. *)
 				try ignore (int_of_string sym_name)
-				with Failure _ ->
+				with Failure _ -> (
 					let s = Hashtbl.find symbols sym_name in
 					s.inputers <- (plan_idx, input_idx) :: s.inputers ;
-					s.death <- plan_idx in
+					s.death <- plan_idx) in
 			let create_symbol output_idx sym_name =
 				assert (Hashtbl.find_all symbols sym_name = []) ;
 				Hashtbl.add symbols sym_name {
@@ -187,63 +236,51 @@ struct
 					inputers = [] ;
 					birth = plan_idx ;
 					death = plan_idx ;
-					alloc_bank = preplan.(plan_idx).prealloc_impl.Impl.out_banks.(output_idx) ;
-					alloc_reg = 0 } in
-			(* For each input names, add me as an inputer. *)
-			Array.iteri add_inputer pp.input_names ;
+					alloc_bank = plan.(plan_idx).impl.Impl.out_banks.(output_idx) ;
+					alloc_reg = -1 } in
 			(* For each output names, create the symbol. *)
-			Array.iteri create_symbol pp.output_names) preplan ;
+			Array.iteri create_symbol pp.output_names ;
+			(* For each input names, add me as an inputer. *)
+			Array.iteri add_inputer pp.input_names) plan ;
 		
-		(* But we have loops : all vars outputed before the looping
-		 * point and inputed after it must be kept untill loop end. *)
-		let check_death sym_name symbol = 
+		(* But we have loops : all vars outputed before a looping
+		 * point and inputed after it must be kept until loop end. *)
+		let postpone_death sym_name symbol =
 			let (outputer_idx, _) = symbol.outputer in
-			let check_loop (loop_start_idx, loop_end_idx) =
-				if
-					outputer_idx < loop_start_idx &&
-					List.exists (fun (inputer_idx, _) -> inputer_idx >= loop_start_idx) symbol.inputers
-				then (
-					Printf.printf "Make register %s immortal in loop [%d -> %d].\n"
-						sym_name loop_start_idx loop_end_idx ;
-					symbol.death <- loop_end_idx) in
-			List.iter check_loop loops in
-		Hashtbl.iter check_death symbols ;
+			let last_user = List.fold_left
+				(fun prev_max (inputer_idx, _) -> max prev_max inputer_idx)
+				0 symbol.inputers in
+			let last_loop_head =
+				let rec aux last_head idx =
+					if idx > last_user then last_head
+					else aux (if plan.(idx).kind = Loop_head then idx else last_head) (idx+1) in
+				aux 0 0 in
+			if last_loop_head > outputer_idx then (
+				let this_loop_tail =
+					let rec aux level idx = match plan.(idx).kind with
+						| Loop_head -> aux (level+1) (idx+1)
+						| Loop_tail -> if level = 1 then idx else aux (level-1) (idx+1)
+						| _ -> aux level (idx+1) in
+					aux 0 last_loop_head in
+				Printf.printf "Make symbol %s immortal in loop [%d -> %d].\n"
+					sym_name last_loop_head this_loop_tail ;
+				symbol.death <- this_loop_tail) in
+		Hashtbl.iter postpone_death symbols ;
 		
-		(* Find out how many registers we need to store vars. *)
-		let nb_var_regs = Array.init (Array.length Impl.register_sets) (fun _ ->
-			Array.make (Array.length preplan) 0) in
+		(* Find out how many registers are needed at each step. *)
+		let nb_var_regs = Array.init nb_banks (fun _ ->
+			Array.make (Array.length plan) 0) in
 		Hashtbl.iter (fun _sym_name symbol ->
 			for i = symbol.birth to symbol.death do
-				nb_var_regs.(symbol.alloc_bank).(i) <- nb_var_regs.(symbol.alloc_bank).(i) + 1
+				nb_var_regs.(symbol.alloc_bank).(i) <- succ nb_var_regs.(symbol.alloc_bank).(i)
 			done) symbols ;
-		let nb_vars = Array.init (Array.length Impl.register_sets) (fun b ->
+		let nb_vars = Array.init nb_banks (fun b ->
 			Array.fold_left max 0 nb_var_regs.(b)) in
 		Printf.printf "For vars we need :\n" ;
 		Array.iteri (fun bank nb -> Printf.printf "\t%d regs from bank %d\n" nb bank) nb_vars ;
 		
-		(* Find out how many registers we need for perm and scratch regs, per bank. *)
-		let arr_or_zero arr idx =
-			if idx < Array.length arr then arr.(idx) else 0 in
-		let get_required_perms bank =
-			Array.fold_left (fun prev pp -> prev + (arr_or_zero pp.prealloc_impl.Impl.perm bank)) 0 preplan in
-		let get_required_scratchs bank =
-			Array.fold_left (fun prev pp -> max prev (arr_or_zero pp.prealloc_impl.Impl.scratch bank)) 0 preplan in
-		let nb_banks   = Array.length Impl.register_sets in
-		let nb_perms   = Array.init nb_banks get_required_perms in
-		let nb_scratch = Array.init nb_banks get_required_scratchs in
-		for bank = 0 to nb_banks - 1 do
-			Printf.printf "Bank %d : need %d perms registers, %d scratch registers.\n"
-				bank nb_perms.(bank) nb_scratch.(bank)
-		done ;
-
-		(* Partition register banks like this : first the permanent registers,
-		 * then the scratch registers, then the var registers. *)
-		let first_perm _bank = 0 in
-		let first_scratch bank = (first_perm bank) + nb_perms.(bank) in
-		let first_var bank = (first_scratch bank) + nb_scratch.(bank) in
-
 		(* For allocating var registers we need a bitmap of these registers : *)
-		let var_reg_bitmap = Array.init (Array.length Impl.register_sets) (fun b ->
+		let var_reg_bitmap = Array.init nb_banks (fun b ->
 			Array.make nb_vars.(b) false) in
 		let alloc_var_reg bank =
 			let rec aux i =
@@ -252,86 +289,60 @@ struct
 			aux 0 in
 		let free_var_reg (bank, i) =
 			var_reg_bitmap.(bank).(i) <- false in
-		let freelist_at_step = Array.make ((Array.length preplan)+1) [] in
+		let freelist_at_step = Array.make ((Array.length plan)+1) [] in
 
-		(* Then build the plan *)
-		let next_perm = Array.init nb_banks (fun b -> first_perm b) in
-		let nb_regs reqs = Array.fold_left (+) 0 reqs in
-		let bank_of reqs i =	(* from [|5;4|] and 7, return 1,2 *)
-			let rec aux bank i =
-				if i <= reqs.(bank) then bank, i
-				else aux (bank+1) (i-reqs.(bank)) in
-			aux 0 i in
-		let alloc_perm_of_bank bank =
-			let res = next_perm.(bank) in
-			next_perm.(bank) <- succ next_perm.(bank) ;
-			Reg (bank, res) in
-		let init_plan plan_idx =
+		(* Now perform allocation for all symbols, stepping the plan and allocating/freeing
+		 * regs as required *)
+		for step = 0 to Array.length plan do
 			(* Free the vars that will not be used any more. *)
-			List.iter free_var_reg freelist_at_step.(plan_idx) ;
-			(* Build plan *)
-			let pp = preplan.(plan_idx) in
-			let impl = pp.prealloc_impl in {
-				impl = impl ;
-				perm_regs = Array.init (nb_regs impl.Impl.perm)
-					(fun i ->
-						let b = fst (bank_of impl.Impl.perm i) in
-						let r = alloc_perm_of_bank b in
-						Hashtbl.replace used_regs r true ;
-						r) ;
-				scratch_regs = Array.init (nb_regs impl.Impl.scratch)
-					(fun i ->
-						let b, r_in_bank = bank_of impl.Impl.scratch i in
-						let r = Reg (b, (first_scratch b) + r_in_bank) in
-						Hashtbl.replace used_regs r true ;
-						r) ;
-				out_regs = Array.init (Array.length pp.output_names)
-					(fun i ->
-						let sym_name = pp.output_names.(i) in
-						let symbol = Hashtbl.find symbols sym_name in
-						let free_slot = alloc_var_reg symbol.alloc_bank in
-						let b = symbol.alloc_bank in
-						let rnum = free_slot + (first_var b) in
-						let r = Reg (b, rnum) in
-						freelist_at_step.(symbol.death + 1) <-
-							(b, free_slot) :: freelist_at_step.(symbol.death + 1) ;
-						Printf.printf "Using register %d.%d for %s up to step %d\n" b rnum sym_name symbol.death ;
-						Hashtbl.replace used_regs r true ;
-						r) ;
-				(* We cannot initialize in_regs for now, since we need to refer back to
-				 * previously created plan entries. So we create a dummy array here and will finish
-				 * initialization hereafter. *)
-				in_regs = [||] } in
-		let plan = Array.init (Array.length preplan) init_plan in
-		(* Finish init of in_regs. *)
-		for plan_idx = 0 to (Array.length plan) - 1 do
-			let pp = preplan.(plan_idx) in
-			plan.(plan_idx).in_regs <- Array.init (Array.length pp.input_names) (fun i ->
-				let sym_name = pp.input_names.(i) in
-				try Cst (int_of_string sym_name)
-				with Failure _ ->
-					let symbol = Hashtbl.find symbols sym_name in
-					let outputer_idx, output_idx = symbol.outputer in
-					plan.(outputer_idx).out_regs.(output_idx))
+			List.iter free_var_reg freelist_at_step.(step) ;
+			(* Alloc a reg for all symbols born at this step *)
+			Hashtbl.iter (fun sym_name symbol ->
+				if symbol.birth = step then (
+					symbol.alloc_reg <- alloc_var_reg symbol.alloc_bank ;
+					freelist_at_step.(symbol.death + 1) <-
+						(symbol.alloc_bank, symbol.alloc_reg) :: freelist_at_step.(symbol.death + 1) ;
+					Hashtbl.replace used_regs (symbol.alloc_bank, symbol.alloc_reg) true ;
+					Printf.printf "Using register %d.%d for %s from step %d to %d\n"
+						symbol.alloc_bank symbol.alloc_reg sym_name symbol.birth symbol.death))
+				symbols ;
 		done ;
-		plan, used_regs
+
+		(* Then build the getter *)
+		let getter step name =
+			let get_symbol n =
+				Printf.printf "looking for symbol %s\n" n ;
+				let symbol = Hashtbl.find symbols n in
+				assert (symbol.birth <= step && symbol.death >= step) ;
+				Impl.Vreg (symbol.alloc_bank, symbol.alloc_reg) in
+			let get_sym_or_const n =
+				try Impl.Vcst (Impl.word_of_string n)
+				with Failure _ -> get_symbol n in
+			let get_input idx =
+				get_sym_or_const plan.(step).input_names.(idx) in
+			let get_output idx =
+				get_symbol plan.(step).output_names.(idx) in
+			(* By convention, names matching '<i' means ith input
+			 * while '>o' means oth output *)
+			try Scanf.sscanf name "<%d" get_input
+			with Scanf.Scan_failure _ ->
+			try Scanf.sscanf name ">%d" get_output
+			with Scanf.Scan_failure _ ->
+			get_symbol name in
+		getter, hashtbl_keys used_regs
 
 	let compile (program : program) (params : program_param array) =
 		let proc = Impl.make_proc (Array.length params) in
 		(* Choosing an implementation *)
-		let preplan, loops = make_preplan program params in
+		let plan = make_plan program params in
+		print_plan plan ;
 		(* Register allocation. *)
-		let plan, used_regs = reg_allocation preplan loops in
+		let getter, used_regs = reg_allocation plan in
 		(* Emit procedure code *)
 		Impl.emit_entry_point proc [||] used_regs ;
-		(* Emit loop invariants *)
-		Array.iter
-			(fun { impl=impl; perm_regs=perm_regs } ->
-				impl.Impl.preamble_emitter proc perm_regs) plan ;
 		(* Emit function body *)
-		Array.iter
-			(fun { impl=impl; in_regs=in_regs; scratch_regs=scratch_regs; out_regs=out_regs} ->
-				impl.Impl.emitter proc in_regs scratch_regs out_regs) plan ;
+		Array.iteri (fun step p ->
+			p.impl.Impl.emitter proc (getter step)) plan ;
 		(* Emit exit code *)
 		Impl.emit_exit proc ;
 		(* Return the function *)
