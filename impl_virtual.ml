@@ -55,7 +55,7 @@ let memory_read_8 addr' offset =
 	big_int_of_int v
 let memory_write_8 addr' offset value =
 	let addr = nativeint_of_big_int addr' in
-	let v = (int_of_big_int value) land 0xff in
+	let v = int_of_big_int (land_big_int value (big_int_of_int 0xff)) in
 	Printf.printf "mem.(%nx+%d) <- %d\n" addr offset v ;
 	poke_byte addr offset v
 
@@ -265,20 +265,20 @@ struct
 		| scale, [| Reg (0, (32, Unsigned)) |], [| 8, _ |] when scale <= 16 -> {
 			out_banks = [| 1 |] ; helpers = [| clock_var |] ;
 			emitter = (fun proc g -> add_code proc (fun () ->
-				reg_write (g ">1")
+				reg_write (g ">0")
 					(memory_read_seq scale (reg_read (g "<0"))
 					(int_of_big_int (reg_read (g "clock")))))) }
 		| scale, [| Reg (0, (32, Unsigned)) |], [| 16, _ |] when scale <= 8 -> {
 			out_banks = [| 1 |] ; helpers = [| clock_var |] ;
 			emitter = (fun proc g -> add_code proc (fun () ->
-				reg_write (g ">1")
+				reg_write (g ">0")
 					(memory_read_seq (scale*2)
 						(reg_read (g "<0"))
 						(2 * (int_of_big_int (reg_read (g "clock"))))))) }
 		| scale, [| Reg (0, (32, Unsigned)) |], [| 32, _ |] when scale <= 4 -> {
 			out_banks = [| 0 |] ; helpers = [| clock_var |] ;
 			emitter = (fun proc g -> add_code proc (fun () ->
-				reg_write (g ">1")
+				reg_write (g ">0")
 					(memory_read_seq (scale*4)
 						(reg_read (g "<0"))
 						(4 * (int_of_big_int (reg_read (g "clock"))))))) }
