@@ -151,6 +151,7 @@ struct
 	let emit_ADDIU  buffer dest source imm = emit_I_type buffer 0b001001 source dest imm
 	let emit_ANDI   buffer dest source imm = emit_I_type buffer 0b001100 source dest imm
 	let emit_ORI    buffer dest source imm = emit_I_type buffer 0b001101 source dest imm
+	let emit_LUI    buffer dest        imm = emit_I_type buffer 0b001111 0      dest imm
 
 	let emit_DADDU buffer dest src1 src2 = emit_R_type buffer 0b000000 src1 src2 dest 0b00000 0b101101
 	let emit_ADDU  buffer dest src1 src2 = emit_R_type buffer 0b000000 src1 src2 dest 0b00000 0b100001
@@ -183,8 +184,43 @@ struct
 			emit_R_type buffer 0b000000 0 reg dest shift 0b111010
 		else
 			emit_R_type buffer 0b000000 0 reg dest (shift-32) 0b111110
-		
+	
+	let emit_MTC1  buffer src dst = emit_R_type buffer 0b010001 0b00100 src dst 0 0
+	let emit_DMTC1 buffer src dst = emit_R_type buffer 0b010001 0b00101 src dst 0 0
+
+	let emit_LI buffer reg value =
+		if value >= 0l && value < 65536l then
+			emit_ORI buffer reg 0 (int_of_word value)
+		else if value >= -32768l && value < 0l then
+			emit_ADDIU buffer reg 0 (int_of_word value)
+		else (
+			let hi = Int32.shift_right_logical value 16
+			and lo = Int32.logand value 0xffffl in
+			emit_LUI buffer reg (int_of_word hi) ;
+			if lo <> 0l then emit_ORI buffer reg reg (int_of_word lo))
+	
 	let emit_NOP buffer = emit_OR buffer 1 1 0 (*emit_SLL buffer 0 0 0*)
+
+	let emit_PCMPGTB   buffer dst a b = emit_R_type buffer 0b010010 0b11101 b a dst 0b001001
+	let emit_PCMPGTH   buffer dst a b = emit_R_type buffer 0b010010 0b11011 b a dst 0b001001
+	let emit_PCMPGTW   buffer dst a b = emit_R_type buffer 0b010010 0b11001 b a dst 0b001001
+	let emit_PMULHUH   buffer dst a b = emit_R_type buffer 0b010010 0b11101 b a dst 0b001010
+	let emit_PMULHH    buffer dst a b = emit_R_type buffer 0b010010 0b11011 b a dst 0b001010
+	let emit_PMULLH    buffer dst a b = emit_R_type buffer 0b010010 0b11010 b a dst 0b001010
+	let emit_PMULUW    buffer dst a b = emit_R_type buffer 0b010010 0b11100 b a dst 0b001010
+	let emit_PSRLH     buffer dst a b = emit_R_type buffer 0b010010 0b11001 b a dst 0b001011
+	let emit_PSRLW     buffer dst a b = emit_R_type buffer 0b010010 0b11000 b a dst 0b001011
+	let emit_PUNPCKLBH buffer dst a b = emit_R_type buffer 0b010010 0b11010 b a dst 0b000011
+	let emit_PUNPCKLHW buffer dst a b = emit_R_type buffer 0b010010 0b11000 b a dst 0b000011
+	let emit_PUNPCKLWD buffer dst a b = emit_R_type buffer 0b010010 0b11100 b a dst 0b001011
+	let emit_POR       buffer dst a b = emit_R_type buffer 0b010010 0b11011 b a dst 0b001100
+	let emit_PSLL      buffer dst a b = emit_R_type buffer 0b010010 0b11000 b a dst 0b001110
+	let emit_PAND      buffer dst a b = emit_R_type buffer 0b010010 0b11110 b a dst 0b000010
+	let emit_PDSLL     buffer dst a b = emit_R_type buffer 0b010010 0b11001 b a dst 0b001110
+	let emit_PSRL      buffer dst a b = emit_R_type buffer 0b010010 0b11000 b a dst 0b001111
+	let emit_PDSRL     buffer dst a b = emit_R_type buffer 0b010010 0b11001 b a dst 0b001111
+	let emit_PSRA      buffer dst a b = emit_R_type buffer 0b010010 0b11001 b a dst 0b001111
+	let emit_PDSRA     buffer dst a b = emit_R_type buffer 0b010010 0b11011 b a dst 0b001111
 	
 	let patch_imm buffer addr imm =
 		Codebuf.patch_byte buffer addr (imm land 0xff) 0xff ;
@@ -196,7 +232,7 @@ struct
 		{ out_banks = [| 0 |] ; helpers = [||] ;
 		  emitter = (fun proc g -> emit_DADDU proc.buffer (reg_of (g "clock")) 0 0) }
 
-	let make_scratch bank name = Inline, name,
+	let make_scratch ?(kind=Inline) bank name = kind, name,
 		{ out_banks = [| bank |] ; helpers = [||] ;
 		  emitter = (fun _proc _g -> ()) }
 
@@ -204,7 +240,7 @@ struct
 	let make_const bank c =
 		let name = const_name bank c in
 		let scratch = make_unique "scratch_for_const" in
-		Invariant, name, { out_banks = [| bank |] ; helpers = [| make_scratch 0 scratch |] ;
+		Invariant, name, { out_banks = [| bank |] ; helpers = [| make_scratch ~kind:Invariant 0 scratch |] ;
 			emitter = (fun proc g ->
 				if bank = 0 then
 					emit_LI proc.buffer (reg_of (g name)) c
@@ -242,6 +278,23 @@ struct
 				if shift > 0 then (
 					(if sz > 32 then emit_DSRL else emit_SRL)
 						proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) shift)) } 
+		(* SIMD *)
+		| 4, [| Reg (1, (sz, sign)) ; Reg (1, (sz', sign')) ; Cst 16l |], [| sz'', sign'' |]
+			when sz <= 16 && sz' <= 16 && sz'' <= 16 &&
+				sign = sign' && sign = sign'' ->
+			{ out_banks = [| 1 |] ;
+			  helpers = [||] ;
+			  emitter = (fun proc g ->
+			  	(if sign = Signed then emit_PMULHH else emit_PMULHUH)
+					proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) (reg_of (g "<1"))) }
+		| 4, [| Reg (1, (sz, _)) ; Reg (1, (sz', _)) ; Cst shift |], [| sz'', _ |]
+			when sz + sz' <= 16 && sz'' <= 16 && shift <= 16l ->
+			{ out_banks = [| 1 |] ;
+			  helpers = [| make_const 1 shift |] ;
+			  emitter = (fun proc g ->
+			  	emit_PMULLH proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) (reg_of (g "<1")) ;
+				if shift > 0l then
+					emit_PSRLH proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) (reg_of (g (const_name 1 shift)))) }
 		| _ -> raise Not_found
 
 	let pack565 = function
@@ -257,6 +310,27 @@ struct
 				emit_OR   proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g scratch)) ;
 				emit_SRL  proc.buffer (reg_of (g scratch)) (reg_of (g "<2")) 3 ; (* B *)
 				emit_OR   proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g scratch))) }
+		(* SIMD *)
+		| 4, [| Reg (1, (8, _)) ; Reg (1, (8, _)) ; Reg (1, (8, _)) |], [| 16, _ |] ->
+			let scratch = make_unique "scratch_565" in
+			{ out_banks = [| 1 |] ;
+			  helpers =
+			  	[| make_scratch 0 scratch ;
+				   make_const 1 3l ; make_const 1 8l ;
+				   make_const 1 0b11111000l ; make_const 1 0b11111100l |] ;
+			  emitter = (fun proc g ->
+				let const_3 = const_name 1 3l
+				and const_8 = const_name 1 8l
+				and mask_RB = const_name 1 0b11111000l
+				and mask_G  = const_name 1 0b11111100l in
+				emit_PAND  proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) (reg_of (g mask_RB)) ;
+				emit_PDSLL proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g const_8)) ;
+				emit_PAND  proc.buffer (reg_of (g scratch)) (reg_of (g "<1")) (reg_of (g mask_G)) ;
+				emit_PDSLL proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g const_3)) ;
+				emit_POR   proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g scratch)) ;
+				emit_PAND  proc.buffer (reg_of (g scratch)) (reg_of (g "<2")) (reg_of (g mask_RB)) ;
+				emit_PDSRL proc.buffer (reg_of (g scratch)) (reg_of (g scratch)) (reg_of (g const_3)) ;
+				emit_POR   proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g scratch))) }
 		| _ -> raise Not_found
 
 	let unpack565 = function
@@ -270,6 +344,36 @@ struct
 			  	emit_ANDI proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) 0xf8 ;
 			  	emit_ANDI proc.buffer (reg_of (g ">1")) (reg_of (g ">1")) 0xfc ;
 			  	emit_ANDI proc.buffer (reg_of (g ">2")) (reg_of (g ">2")) 0xff) }
+		(* SIMD *)
+		| 4, [| Reg (1, (16, _)) |], [| 8, Unsigned ; 8, Unsigned ; 8, Unsigned |] ->
+			{ out_banks = [| 1 ; 1 ; 1 |] ;
+			  (* FIXME: the masks should be repeated scale time, see commented code below *)
+			  helpers = [| make_const 1 3l ; make_const 1 8l ; make_const 1 0b11111000l ; make_const 1 0b11111100l |] ;
+				(*if proc.mask_RB = None then (
+					proc.mask_RB <- Some (reg_of perms.(2)) ;
+					emit_ORI   proc.buffer (reg_of (g scratch)) 0 0b11111000 ;
+					emit_DMTC1 proc.buffer (reg_of (g scratch)) proc.mask_RB ;
+					for i = 1 to 3 do
+						emit_PINSRH i proc.buffer (unopt proc.mask_RB) (unopt proc.mask_RB) (unopt proc.mask_RB)
+					done) ;
+				if proc.mask_G = None then (
+					proc.mask_G = Some (reg_of perms.(3)) ;
+					emit_ORI   proc.buffer (reg_of (g scratch)) 0 0b11111100 ;
+					emit_DMTC1 proc.buffer (reg_of (g scratch)) (unopt proc.mask_G) ;
+					for i = 1 to 3 do
+						emit_PINSRH i proc.buffer (unopt proc.mask_G) (unopt proc.mask_G) (unopt proc.mask_G)
+					done)) ;*)
+			emitter = (fun proc g ->
+				let const_3 = const_name 1 3l
+				and const_8 = const_name 1 8l
+				and mask_RB = const_name 1 0b11111000l
+				and mask_G  = const_name 1 0b11111100l in
+				emit_PDSRL proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) (reg_of (g const_8)) ; 
+				emit_PAND  proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g mask_RB)) ;
+				emit_PDSRL proc.buffer (reg_of (g ">1")) (reg_of (g "<0")) (reg_of (g const_3)) ;
+				emit_PAND  proc.buffer (reg_of (g ">1")) (reg_of (g ">1")) (reg_of (g mask_G)) ;
+				emit_PDSLL proc.buffer (reg_of (g ">2")) (reg_of (g "<0")) (reg_of (g const_3)) ;
+				emit_PAND  proc.buffer (reg_of (g ">2")) (reg_of (g ">2")) (reg_of (g mask_RB))) }
 		| _ -> raise Not_found
 
 	let stream_read = function
@@ -307,6 +411,35 @@ struct
 			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "<0")) ;
 			  	(if sign = Signed then emit_LB else emit_LBU)
 					proc.buffer (reg_of (g ">0")) (reg_of (g scratch)) 0) }
+		(* SIMD *)
+		| scale, [| Reg (0, (32, Unsigned)) |], [| sz, _ |] when scale * sz = 64 ->
+			let scratch = make_unique "scratch_read" in
+			{ out_banks = [| 1 |] ;
+			  helpers = [| make_scratch 1 scratch ; clock_var |] ;
+			  emitter = (fun proc g ->
+			  	emit_ADDU  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "<0")) ;
+			  	emit_LDC 1 proc.buffer (reg_of (g ">0")) (reg_of (g scratch)) 0) }
+		(* In this one we want to store 4 bytes into our SIMD 64 bits register, so we will need to
+		 * expand the values to 16 bits (while still pretending they are 8 bits) *)
+		| 4, [| Reg (0, (32, Unsigned)) |], [| 8, sign |] ->
+			let scratch0 = make_unique "scratch_read"
+			and scratch1 = make_unique "scratch_sign" in
+			{ out_banks = [| 1 |] ;
+			  helpers =
+			  	[| make_scratch 0 scratch0 ;
+				   make_scratch 1 scratch1 ;
+			  	   clock_var ;
+				   make_const 1 0l |] ;
+			  emitter = (fun proc g ->
+			  	emit_ADDU  proc.buffer (reg_of (g scratch0)) (reg_of (g "clock")) (reg_of (g "<0")) ;
+				emit_LW    proc.buffer (reg_of (g scratch0)) (reg_of (g scratch0)) 0 ;
+				emit_MTC1  proc.buffer (reg_of (g scratch0)) (reg_of (g ">0")) ;
+				(* Expand the 4 low bytes into halfwords (interleaving zeros) *)
+				emit_PUNPCKLBH proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g (const_name 1 0l))) ;
+				if sign = Signed then (	(* Now sign-extend the values *)
+					emit_PCMPGTB   proc.buffer (reg_of (g scratch1)) (reg_of (g (const_name 1 0l))) (reg_of (g ">0")) ;
+					emit_PSLL      proc.buffer (reg_of (g scratch1)) (reg_of (g scratch1)) 8 ;
+					emit_POR       proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g scratch1)))) }
 		| _ -> raise Not_found
 
 	let stream_write = function
@@ -341,6 +474,14 @@ struct
 			  emitter = (fun proc g ->
 			  	emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "<0")) ;
 			  	emit_SB   proc.buffer (reg_of (g "<1")) (reg_of (g scratch)) 0) }
+		(* SIMD *)
+		| scale, [| Reg (0, (32, Unsigned)) ; Reg (1, (sz, _)) |], [||] when scale * sz = 64 ->
+			let scratch = make_unique "scratch_write" in
+			{ out_banks = [||] ;
+			  helpers = [| make_scratch 1 scratch ; clock_var |] ;
+			  emitter = (fun proc g ->
+			  	emit_ADDU  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "<0")) ;
+			  	emit_SDC 1 proc.buffer (reg_of (g "<1")) (reg_of (g scratch)) 0) }
 		| _ -> raise Not_found
 
 	let loop_head = function
