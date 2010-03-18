@@ -4,9 +4,10 @@ OCAMLC     = ocamlfind ocamlc
 OCAMLOPT   = ocamlfind ocamlopt
 OCAMLDEP   = ocamlfind ocamldep
 INCS       =
+HAVE_CACHECTL = $(shell if test -r /usr/include/asm/cachectl.h ; then echo '-DHAVE_CACHECTL' ; fi)
 override OCAMLOPTFLAGS += $(INCS) -w Ae -g
 override OCAMLFLAGS    += $(INCS) -w Ae -g
-override CFLAGS        += -ggdb -std=c99 -D_GNU_SOURCE
+override CFLAGS        += -ggdb -std=c99 -D_GNU_SOURCE $(HAVE_CACHECTL)
 override CPPFLAGS      += -I $(shell ocamlfind printconf stdlib)
 
 SOURCES  = jiton.ml codebuffer_impl.ml compiler_impl.ml $(wildcard impl_*.ml)

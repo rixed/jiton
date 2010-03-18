@@ -8,8 +8,10 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/mman.h>
-#include <asm/cachectl.h>
-#include <sys/cachectl.h>
+#ifdef HAVE_CACHECTL
+#	include <asm/cachectl.h>
+#	include <sys/cachectl.h>
+#endif
 #include "codebuf.h"
 
 static size_t filesize(int fd)
@@ -90,12 +92,14 @@ uint8_t codebuf_peek(struct codebuf *codebuf, size_t offset)
 
 static int codebuf_flush(struct codebuf *codebuf)
 {
+#	ifdef HAVE_CACHECTL
 	printf("Flushing pages from %p\n", codebuf->addr);
 
 	if (0 != cacheflush(codebuf->addr, codebuf->length, ICACHE|DCACHE)) {
 		fprintf(stderr, "Cannot flush caches : %s\n", strerror(errno));
 		return -1;
 	}
+#	endif
 	codebuf->need_flush = false;
 	return 0;
 }
