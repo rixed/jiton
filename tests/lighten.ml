@@ -1,5 +1,5 @@
 (*
-	Attempt at a simple rgb darken function :
+	Attempt at a simple rgb lighten function :
 	- read pixel from pixels
 	- unpack565 into r, g, b
 	- read alpha into a
@@ -31,20 +31,24 @@ struct
 		let procedure = Compiler.compile program program_params in
 		Printf.printf "%!" ; (* prepare for the coming segfault :-> *)
 		(* Test it on some inputs *)
-		let nb_pixels = 2 in
-		let pixels = Array1.create int16_unsigned c_layout 2 in
-		let alphas = Array1.create int8_unsigned  c_layout 2 in
-		let image  = Array1.create int16_unsigned c_layout 2 in
-		pixels.{0} <- 0x5678 ;
-		pixels.{1} <- 0x1234 ;
-		alphas.{0} <- 0x40 ;
-		alphas.{1} <- 0x80 ;
+		let nb_pixels = 200 in
+		let pixels = Array1.create int16_unsigned c_layout nb_pixels in
+		let alphas = Array1.create int8_unsigned  c_layout nb_pixels in
+		let image  = Array1.create int16_unsigned c_layout nb_pixels in
+		for p = 0 to nb_pixels - 1 do
+			pixels.{p} <- 0xffff ;
+			alphas.{p} <- if p land 1 <> 0 then 0x80 else 0x0
+		done ;
 		procedure
 			[| Nativeint.of_int nb_pixels ;
 			   address_of_bigarray pixels ;
 			   address_of_bigarray alphas ;
 			   address_of_bigarray image |] ;
-		Printf.printf "Image = 0x%x 0x%x\n" image.{0} image.{1}
+		for p = 0 to nb_pixels - 1 do
+			Printf.printf "%x " image.{p} ;
+			if (p + 1) mod 8 = 0 then Printf.printf "\n"
+		done ;
+		Printf.printf "\n"
 
 end
 

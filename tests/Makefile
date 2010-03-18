@@ -8,7 +8,7 @@ REQUIRES = jiton
 
 .PHONY: all clean
 
-PROGRAMS = virtual_test.byte
+PROGRAMS = lighten.byte
 
 all: $(PROGRAMS)
 opt: $(PROGRAMS:.byte=.opt)

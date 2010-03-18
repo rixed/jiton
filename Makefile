@@ -45,7 +45,7 @@ uninstall:
 reinstall: uninstall install
 
 check: $(ARCHIVE) $(XARCHIVE)
-	make -C tests all opt && tests/virtual_test.byte
+	make -C tests all opt && tests/lighten.byte
 
 # Clean up
 clean:
