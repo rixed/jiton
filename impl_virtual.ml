@@ -363,7 +363,8 @@ struct
 		| _, [| Cst p |], [| sz, _ |] when sz <= register_sizes.(0) ->
 			{ out_banks = [| 0 |] ; helpers = [||] ;
 			  emitter = (fun proc g -> add_code proc (fun () ->
-			  	reg_write (g ">0") (big_int_of_nativeint proc.params.(int_of_word p)))) }
+				let value = big_int_of_nativeint proc.params.(int_of_word p) in
+			  	reg_write (g ">0") value)) }
 		| _ -> raise Not_found
 
 	(* Returns the context used by emitters. *)
@@ -393,7 +394,7 @@ struct
 			| Some loop -> to_top_loop (Some loop) loop.top in
 		proc.loops <- to_top_loop None proc.loops ;
 		let rec aux pc =
-			Printf.printf "Exec function at pc=%d\n" pc ;
+			Printf.printf "Exec function at pc=%d\n%!" pc ;
 			let f = proc.code.(pc) in
 			proc.pc <- succ pc ;
 			f () ;

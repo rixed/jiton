@@ -302,7 +302,6 @@ struct
 		(* Then build the getter *)
 		let getter step name =
 			let get_symbol n =
-				Printf.printf "looking for symbol %s\n" n ;
 				let symbol = Hashtbl.find symbols n in
 				assert (symbol.birth <= step && symbol.death >= step) ;
 				symbol.alloc_bank, symbol.alloc_reg in
