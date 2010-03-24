@@ -81,6 +81,9 @@ sig
 	(* Size of the various register banks *)
 	val register_sets : int array
 
+	(* For a given scale, tells the required alignment. *)
+	val alignment : scale -> int
+
 	(* Returns an empty proc *)
 	val make_proc : int (* number of parameters *) -> proc
 

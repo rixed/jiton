@@ -75,6 +75,8 @@ struct
 			assert (b = 1) ;
 			Printf.sprintf "$f%d" (reg_of (1, r)))
 
+	let alignment scale = scale
+
 	(* loop_descr is used to remember where a loop started and where it stops *) 
 	type loop_descr_record = { start : int ; blez : int ; top : loop_descr }
 	and loop_descr = loop_descr_record option
@@ -527,8 +529,13 @@ struct
 		| _ -> raise Not_found
 
 	(* Returns the context used by emitters. *)
+	let next_seq =
+		let seqnum = ref 0 in
+		(fun () -> incr seqnum ; !seqnum)
+
 	let make_proc _nb_sources =
-		{ buffer = Codebuf.make 1024 "/tmp/test.code" ;
+		let seq = next_seq () in
+		{ buffer = Codebuf.make 1024 ("/tmp/test.code"^(string_of_int seq)) ;
 		  loops = None ;
 		  params = [||] ;
 		  frame_size = 0 ;

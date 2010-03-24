@@ -129,6 +129,8 @@ struct
 
 	let regs = Array.init nb_banks (fun bank -> Array.make register_sets.(bank) zero_big_int)
 
+	let alignment _ = 1
+
 	let reg_write (bank, r) v_ =
 		let v = land_big_int v_ register_masks.(bank) in
 		Printf.printf "reg.(%d).(%d) <- %s\n" bank r (string_of_big_int v) ;

@@ -53,7 +53,9 @@ clean:
 
 # Just to remember the cmd line
 dump:
-	objdump -m mips:loongson_2f -b binary -M no-aliases,gpr-names=n32 -D /tmp/test.code
+	for i in /tmp/test.code* ; do \
+		objdump -m mips:loongson_2f -b binary -M no-aliases,gpr-names=n32 -D $$i ; \
+	done
 
 # Dependencies
 .depend: $(SOURCES)
