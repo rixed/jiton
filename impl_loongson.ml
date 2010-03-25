@@ -104,7 +104,11 @@ struct
 		| None -> failwith "Nothing where something was expected."
 		| Some x -> x
 
-	(*MIPS instruction encoding *)
+	let rec log2 x =
+		if x <= 1 then 0
+		else 1 + (log2 (x lsr 1))
+
+	(* MIPS instruction encoding *)
 
 	let append_hw buffer value =
 		Codebuf.append buffer (value land 0xff) ;
@@ -175,7 +179,7 @@ struct
 	let emit_SLL  buffer dest reg shift = emit_R_type buffer 0b000000 0 reg dest shift 0b000000
 	let emit_SRL  buffer dest reg shift = emit_R_type buffer 0b000000 0 reg dest shift 0b000000
 	let emit_SRA  buffer dest reg shift = emit_R_type buffer 0b000000 0 reg dest shift 0b000011
-	let emit_SRL  buffer dest reg shift = emit_R_type buffer 0b000000 0 reg dest shift 0b000010
+	let emit_SLA  buffer dest reg shift = emit_R_type buffer 0b000000 0 reg dest shift 0b000010
 	let emit_DSLL buffer dest reg shift =
 		if shift < 32 then
 			emit_R_type buffer 0b000000 0 reg dest shift 0b111000
@@ -419,7 +423,15 @@ struct
 			{ out_banks = [| 1 |] ;
 			  helpers = [| make_scratch 1 scratch ; clock_var |] ;
 			  emitter = (fun proc g ->
-			  	emit_ADDU  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "<0")) ;
+				(* Offset is (clock/scale) * 8 *)
+				if scale = 8 then
+			  		emit_ADDU  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "<0"))
+				else if scale > 8 then (
+					emit_SRL  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (log2 (scale/8)) ;
+					emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "<0")) (reg_of (g scratch)))
+				else if scale < 8 then (
+					emit_SLL  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (log2 (8/scale)) ;
+					emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "<0")) (reg_of (g scratch))) ;
 			  	emit_LDC 1 proc.buffer (reg_of (g ">0")) (reg_of (g scratch)) 0) }
 		(* In this one we want to store 4 bytes into our SIMD 64 bits register, so we will need to
 		 * expand the values to 16 bits (while still pretending they are 8 bits) *)
@@ -482,7 +494,15 @@ struct
 			{ out_banks = [||] ;
 			  helpers = [| make_scratch 1 scratch ; clock_var |] ;
 			  emitter = (fun proc g ->
-			  	emit_ADDU  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "<0")) ;
+				(* Offset is (clock/scale) * 8 *)
+				if scale = 8 then
+			  		emit_ADDU  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (reg_of (g "<0"))
+				else if scale > 8 then (
+					emit_SRL  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (log2 (scale/8)) ;
+					emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "<0")) (reg_of (g scratch)))
+				else if scale < 8 then (
+					emit_SLL  proc.buffer (reg_of (g scratch)) (reg_of (g "clock")) (log2 (8/scale)) ;
+					emit_ADDU proc.buffer (reg_of (g scratch)) (reg_of (g "<0")) (reg_of (g scratch))) ;
 			  	emit_SDC 1 proc.buffer (reg_of (g "<1")) (reg_of (g scratch)) 0) }
 		| _ -> raise Not_found
 
