@@ -327,26 +327,43 @@ struct
 			let fast_fun = fun_of_plan fast_plan in
 			let align = Impl.alignment scale in
 			let align_mask = Nativeint.of_int ((1 lsl align) - 1) in
+			Printf.printf "Required alignment is %d bits\n" align ;
 			(fun params ->
 				if params.(0) >= Nativeint.of_int scale then (
 					(* We act very conservatively for archs requiring special
 					 * alignment : if any of the argument of stream_read/write
 					 * is misaligned, we use the scale=1 function all along.
-					 * TODO: We could also check if the misalignment is the same
-					 * for all addresses and then align first using slow_fun ?
 					 *)
-					let all_addresses_aligned = 
-						align = 1 ||
-						List.for_all
-							(fun p -> Nativeint.logand params.(p) align_mask = 0n)
-							addresses_in_params in
-					if all_addresses_aligned then (
-						Printf.printf "Running fast version, scale=%d\n%!" scale ;
+					(* Return the alignment if it's common to all addresses *)
+					let initial_align = 
+						if align = 1 then Some 0n
+						else try
+							List.fold_left (fun prev p ->
+								let offset = Nativeint.logand params.(p) align_mask in
+								Printf.printf "Address %d (%nx) is offset from %nd\n" p params.(p) offset ;
+								match prev with
+								| None -> Some offset
+								| Some prev_offset ->
+									if offset = prev_offset then prev
+									else raise Exit)
+								None addresses_in_params
+							with Exit -> None in
+					match initial_align with
+					| None -> (* No common alignment amongst pointer, use only scale = 1 *)
+						()
+					| Some offset -> (	(* First align, then use fast version *)
+						if offset <> 0n then (
+							let init_width = params.(0) in
+							params.(0) <- Nativeint.sub (Nativeint.of_int align) offset ;
+							Printf.printf "Align using slow version for width=%nd\n%!" params.(0) ;
+							slow_fun params ;
+							params.(0) <- Nativeint.sub init_width params.(0)) ;
+						Printf.printf "Running fast version, scale=%d for width=%nd\n%!"
+							scale params.(0) ;
 						fast_fun params ;
-						params.(0) <- Nativeint.rem params.(0) (Nativeint.of_int scale) ;
-					)
-				) ;
-				Printf.printf "Running slow version for remaining width=%nd\n%!" params.(0) ;
-				slow_fun params)
+						params.(0) <- Nativeint.rem params.(0) (Nativeint.of_int scale))) ;
+				if params.(0) > 0n then (
+					Printf.printf "Running slow version for remaining width=%nd\n%!" params.(0) ;
+					slow_fun params))
 		) with Not_found -> slow_fun
 end
