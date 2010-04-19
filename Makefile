@@ -23,7 +23,8 @@ REQUIRES   = num bigarray
 
 .PHONY: clean all dump
 
-all: $(ARCHIVE)
+all: byte opt
+byte: $(ARCHIVE)
 opt: $(XARCHIVE)
 
 $(CLIB): $(CSOURCES:.c=.o)
