@@ -75,8 +75,6 @@ struct
 			assert (b = 1) ;
 			Printf.sprintf "$f%d" (reg_of (1, r)))
 
-	let alignment scale = scale
-
 	(* loop_descr is used to remember where a loop started and where it stops *) 
 	type loop_descr_record = { start : int ; blez : int ; top : loop_descr }
 	and loop_descr = loop_descr_record option
@@ -382,7 +380,7 @@ struct
 				emit_PAND  proc.buffer (reg_of (g ">2")) (reg_of (g ">2")) (reg_of (g mask_RB))) }
 		| _ -> raise Not_found
 
-	let stream_read = function
+	let stream_read_aligned = function
 		| 1, [| Reg (0, (32, Unsigned)) |], [| 64, _ |] ->
 			let scratch = make_unique "scratch_read" in
 			{ out_banks = [| 0 |] ;
@@ -456,7 +454,7 @@ struct
 					emit_POR       proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g scratch1)))) }
 		| _ -> raise Not_found
 
-	let stream_write = function
+	let stream_write_aligned = function
 		| 1, [| Reg (0, (32, Unsigned)) ; Reg (0, (64, _)) |], [||] ->
 			let scratch = make_unique "scratch_write" in
 			{ out_banks = [||] ;

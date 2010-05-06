@@ -65,7 +65,7 @@ struct
 	(* From a "user program" giving only the main ingredients, build a plan
 	 * by cooking possible implementations, served with loop and procedure call machinery.
 	 *)
-	let make_plan ?(min_scale=1) ?(max_scale=1) (program : program) func_params =
+	let make_plan (program : program) func_params =
 		let func_param_names = Array.map fst func_params in
 		let func_param_dtypes = Array.map snd func_params in
 		(* Returns a path of largest allowed scale.
@@ -156,8 +156,39 @@ struct
 			let new_plan = Array.concat [ [|loop_head|] ; path ; [|loop_tail|] ] in
 			Array.iter (expand_step Inline) new_plan ;
 			Array.of_list (List.rev_append !invariants (List.rev !body)) in
-		let path, scale = make_path min_scale max_scale in
-		Array.concat [ load_params ; loop_of_path path scale ], scale
+		let rename_vars suffix plan =
+			let array_exits arr e =
+				try (
+					Array.iter (fun e' -> if e = e' then raise Exit) arr ;
+					false
+				) with Exit -> true in
+			let is_constant s = try (ignore (int_of_string s) ; true) with Failure _ -> false in
+			let renamed arr = Array.map (fun s ->
+				if array_exits func_param_names s || is_constant s then s else s^suffix) arr in
+			Array.map (fun p ->
+				{	p with
+					input_names  = (renamed p.input_names) ;
+					output_names = (renamed p.output_names) }) plan in
+		let plan_of_path path =
+			Array.concat [ load_params ; loop_of_path path 1 ] in
+		let combine_paths slow_path fast_path scale =
+			(* FIXME: we do not take into account data alignment here. but how can we ? *)
+			(* We must force order of evalutation to have invariants outputed in front of the
+			 * first loop. *)
+			let fast_loop = loop_of_path (rename_vars "[fast]" fast_path) scale
+			and slow_loop = loop_of_path (rename_vars "[slow_finish]" slow_path) 1 in
+			Array.concat [ load_params ; fast_loop ; slow_loop ] in
+		(* First, build the slow path (1 item at a time) *)
+		let slow_path, _ = make_path 1 1 in
+		(* Then look for a fast path (N items at a time) *)
+		try (
+			let fast_path, scale = make_path 2 8 in
+			(* Then build the final path using both slow and fast paths. *)
+			combine_paths slow_path fast_path scale
+		) with Not_found -> (
+			(* Or using only the slow path if no fast path was found. *)
+			plan_of_path slow_path
+		)
 
 	(*
 	 * Phase 2 : registers allocation
@@ -287,83 +318,21 @@ struct
 			get_symbol name in
 		getter, hashtbl_keys used_regs
 
-	let rec compile (program : program) (params : program_param array) =
-		let addresses_in_params =
-			let symbol_is_address name =
-				try (for i = 0 to (Array.length program)-1 do
-					let chooser, inputs, _ = program.(i) in
-					if (chooser == Impl.stream_read || chooser == Impl.stream_write) &&
-						inputs.(0) = name then
-						raise Exit
-				done ;
-				false
-				) with Exit -> true in
-			let rec aux prevs p =
-				if p >= Array.length params then prevs else match params.(p) with
-					| name, _ when symbol_is_address name -> aux (p::prevs) (p+1)
-					| _ -> aux prevs (p+1) in
-			aux [] 0 in
-		let fun_of_plan plan =
-			Printf.printf "Building a function for plan :\n" ;
-			print_plan plan ;
-			(* Build new proc. *)
-			let proc = Impl.make_proc (Array.length params) in
-			(* Register allocation. *)
-			let getter, used_regs = reg_allocation plan in
-			(* Emit procedure code *)
-			Impl.emit_entry_point proc [||] used_regs ;
-			(* Emit function body *)
-			Array.iteri (fun step p ->
-				p.impl.Impl.emitter proc (getter step)) plan ;
-			(* Emit exit code *)
-			Impl.emit_exit proc ;
-			(* Return the function *)
-			Impl.exec proc in
-		(* First we build a function for scale = 1 *)
-		let slow_plan, _ = make_plan ~max_scale:1 program params in
-		let slow_fun = fun_of_plan slow_plan in
-		try (
-			let fast_plan, scale = make_plan ~min_scale:1 ~max_scale:8 program params in
-			let fast_fun = fun_of_plan fast_plan in
-			let align = Impl.alignment scale in
-			let align_mask = Nativeint.of_int ((1 lsl align) - 1) in
-			Printf.printf "Required alignment is %d bits\n" align ;
-			(fun params ->
-				if params.(0) >= Nativeint.of_int scale then (
-					(* We act very conservatively for archs requiring special
-					 * alignment : if any of the argument of stream_read/write
-					 * is misaligned, we use the scale=1 function all along.
-					 *)
-					(* Return the alignment if it's common to all addresses *)
-					let initial_align = 
-						if align = 1 then Some 0n
-						else try
-							List.fold_left (fun prev p ->
-								let offset = Nativeint.logand params.(p) align_mask in
-								Printf.printf "Address %d (%nx) is offset from %nd\n" p params.(p) offset ;
-								match prev with
-								| None -> Some offset
-								| Some prev_offset ->
-									if offset = prev_offset then prev
-									else raise Exit)
-								None addresses_in_params
-							with Exit -> None in
-					match initial_align with
-					| None -> (* No common alignment amongst pointer, use only scale = 1 *)
-						()
-					| Some offset -> (	(* First align, then use fast version *)
-						if offset <> 0n then (
-							let init_width = params.(0) in
-							params.(0) <- Nativeint.sub (Nativeint.of_int align) offset ;
-							Printf.printf "Align using slow version for width=%nd\n%!" params.(0) ;
-							slow_fun params ;
-							params.(0) <- Nativeint.sub init_width params.(0)) ;
-						Printf.printf "Running fast version, scale=%d for width=%nd\n%!"
-							scale params.(0) ;
-						fast_fun params ;
-						params.(0) <- Nativeint.rem params.(0) (Nativeint.of_int scale))) ;
-				if params.(0) > 0n then (
-					Printf.printf "Running slow version for remaining width=%nd\n%!" params.(0) ;
-					slow_fun params))
-		) with Not_found -> slow_fun
+	let compile (program : program) (params : program_param array) =
+		let proc = Impl.make_proc (Array.length params) in
+		(* Choosing an implementation *)
+		let plan = make_plan program params in
+		print_plan plan ;
+		(* Register allocation. *)
+		let getter, used_regs = reg_allocation plan in
+		(* Emit procedure code *)
+		Impl.emit_entry_point proc [||] used_regs ;
+		(* Emit function body *)
+		Array.iteri (fun step p ->
+			p.impl.Impl.emitter proc (getter step)) plan ;
+		(* Emit exit code *)
+		Impl.emit_exit proc ;
+		(* Return the function *)
+		Impl.exec proc
+	
 end

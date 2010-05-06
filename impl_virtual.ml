@@ -129,8 +129,6 @@ struct
 
 	let regs = Array.init nb_banks (fun bank -> Array.make register_sets.(bank) zero_big_int)
 
-	let alignment _ = 1
-
 	let reg_write (bank, r) v_ =
 		let v = land_big_int v_ register_masks.(bank) in
 		Printf.printf "reg.(%d).(%d) <- %s\n" bank r (string_of_big_int v) ;
@@ -245,7 +243,7 @@ struct
 				unpack565_helper (g "<0") (g ">0") (g ">1") (g ">2") scale)) }
 		| _ -> raise Not_found
 
-	let stream_read = function
+	let stream_read_aligned = function
 		| scale, [| Reg (0, (32, Unsigned)) |], [| 8, _ |] when scale <= 4 -> {
 			out_banks = [| 0 |] ; helpers = [| clock_var |] ;
 			emitter = (fun proc g -> add_code proc (fun () ->
@@ -286,7 +284,7 @@ struct
 						(4 * (int_of_big_int (reg_read (g "clock"))))))) }
 		| _ -> raise Not_found
 
-	let stream_write = function
+	let stream_write_aligned = function
 		| scale, [| Reg (0, (32, Unsigned)) ; Reg (0, (8, _)) |], [||] when scale <= 4 -> {
 			out_banks = [||] ; helpers = [| clock_var |] ;
 			emitter = (fun proc g -> add_code proc (fun () ->

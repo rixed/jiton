@@ -81,9 +81,6 @@ sig
 	(* Size of the various register banks *)
 	val register_sets : int array
 
-	(* For a given scale, tells the required alignment (in bits). *)
-	val alignment : scale -> int
-
 	(* Returns an empty proc *)
 	val make_proc : int (* number of parameters *) -> proc
 
@@ -117,8 +114,8 @@ sig
 	(* Takes a constant N as only input and outputs a value equal to
 	 * the Nth parameter of the function : *)
 	val load_param : impl_lookup
-	val stream_read : impl_lookup
-	val stream_write : impl_lookup
+	val stream_read_aligned : impl_lookup
+	val stream_write_aligned : impl_lookup
 	val mul_rshift : impl_lookup
 	val pack565 : impl_lookup
 	val unpack565 : impl_lookup
@@ -154,11 +151,11 @@ end
 module type COMPILER =
 sig
 	module Impl : IMPLEMENTER
-	
+
 	type program_step = Impl.impl_lookup * string array * (string * data_type) array
-	
+
 	type program = program_step array
-	
+
 	type program_param = string * data_type
 
 	val compile : program -> program_param array -> (nativeint array -> unit)

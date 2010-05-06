@@ -19,14 +19,14 @@ struct
 
 	let () =
 		let program = [|
-			Impl.stream_read, [| "pixels" |], [| "pixel", (16, Unsigned) |] ;
+			Impl.stream_read_aligned, [| "pixels" |], [| "pixel", (16, Unsigned) |] ;
 			Impl.unpack565, [| "pixel" |], [| "r", (8, Unsigned) ; "g", (8, Unsigned) ; "b", (8, Unsigned) |] ;
-			Impl.stream_read, [| "alpha" |], [| "a", (8, Unsigned) |] ;
+			Impl.stream_read_aligned, [| "alpha" |], [| "a", (8, Unsigned) |] ;
 			Impl.mul_rshift, [| "r" ; "a" ; "8" |], [| "r'", (8, Unsigned) |] ;
 			Impl.mul_rshift, [| "g" ; "a" ; "8" |], [| "g'", (8, Unsigned) |] ;
 			Impl.mul_rshift, [| "b" ; "a" ; "8" |], [| "b'", (8, Unsigned) |] ;
 			Impl.pack565, [| "r'" ; "g'" ; "b'" |], [| "pixel'", (16, Unsigned) |] ;
-			Impl.stream_write, [| "image" ; "pixel'" |], [||] |] in
+			Impl.stream_write_aligned, [| "image" ; "pixel'" |], [||] |] in
 		let program_params = [| "width", (32, Unsigned) ; "pixels", (32, Unsigned) ; "alpha", (32, Unsigned) ; "image", (32, Unsigned) |] in
 		let procedure = Compiler.compile program program_params in
 		Printf.printf "%!" ; (* prepare for the coming segfault :-> *)
