@@ -175,9 +175,9 @@ struct
 	let emit_DMULTUG buffer dest a b = emit_R_type buffer 0b011100 a b dest 0b00000 0b010011
 	
 	let emit_SLL  buffer dest reg shift = emit_R_type buffer 0b000000 0 reg dest shift 0b000000
-	let emit_SRL  buffer dest reg shift = emit_R_type buffer 0b000000 0 reg dest shift 0b000000
+	let emit_SRL  buffer dest reg shift = emit_R_type buffer 0b000000 0 reg dest shift 0b000010
+	let emit_SLA  = emit_SLL
 	let emit_SRA  buffer dest reg shift = emit_R_type buffer 0b000000 0 reg dest shift 0b000011
-	let emit_SLA  buffer dest reg shift = emit_R_type buffer 0b000000 0 reg dest shift 0b000010
 	let emit_DSLL buffer dest reg shift =
 		if shift < 32 then
 			emit_R_type buffer 0b000000 0 reg dest shift 0b111000
