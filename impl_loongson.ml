@@ -226,10 +226,12 @@ struct
 	let emit_PCMPGTB   buffer dst a b = emit_R_type buffer 0b010010 0b11101 b a dst 0b001001
 	let emit_PCMPGTH   buffer dst a b = emit_R_type buffer 0b010010 0b11011 b a dst 0b001001
 	let emit_PCMPGTW   buffer dst a b = emit_R_type buffer 0b010010 0b11001 b a dst 0b001001
+	let emit_PINSRH  h buffer dst a b = emit_R_type buffer 0b010010 (0b11100+h) b a dst 0b000011
 	let emit_PMULHUH   buffer dst a b = emit_R_type buffer 0b010010 0b11101 b a dst 0b001010
 	let emit_PMULHH    buffer dst a b = emit_R_type buffer 0b010010 0b11011 b a dst 0b001010
 	let emit_PMULLH    buffer dst a b = emit_R_type buffer 0b010010 0b11010 b a dst 0b001010
 	let emit_PMULUW    buffer dst a b = emit_R_type buffer 0b010010 0b11100 b a dst 0b001010
+	let emit_PSHUFH    buffer dst a b = emit_R_type buffer 0b010010 0b11000 b a dst 0b000010
 	let emit_PSRLH     buffer dst a b = emit_R_type buffer 0b010010 0b11001 b a dst 0b001011
 	let emit_PSRLW     buffer dst a b = emit_R_type buffer 0b010010 0b11000 b a dst 0b001011
 	let emit_PUNPCKLBH buffer dst a b = emit_R_type buffer 0b010010 0b11010 b a dst 0b000011
@@ -270,6 +272,29 @@ struct
 					assert (bank = 1) ;
 					emit_LI proc.buffer (reg_of (g scratch)) c ;
 					emit_DMTC1 proc.buffer (reg_of (g scratch)) (reg_of (g name)))) }
+	let simd_const_name repet c = "const_simd_"^(string_of_int repet)^"x"^(string_of_word c)
+	let make_simd_const repet c =
+		let name = simd_const_name repet c in
+		let scratch0 = make_unique "scratch0_for_simd_const" in
+		let scratch1 = make_unique "scratch1_for_simd_const" in
+		Invariant, name, { out_banks = [| 1 |] ; helpers = [| make_scratch ~kind:Invariant 0 scratch0 ; make_scratch ~kind:Invariant 1 scratch1 |] ;
+			emitter = (fun proc g ->
+			emit_LI proc.buffer (reg_of (g scratch0)) c ;
+			emit_DMTC1 proc.buffer (reg_of (g scratch0)) (reg_of (g name)) ;
+			if repet = 2 then (
+				emit_LI proc.buffer (reg_of (g scratch0)) 0b01000100l ;
+				emit_DMTC1 proc.buffer (reg_of (g scratch0)) (reg_of (g scratch1)) ;
+				emit_PSHUFH proc.buffer (reg_of (g name)) (reg_of (g name)) (reg_of (g scratch1))
+			) else if repet = 4 then (
+				(* FIXME: no need for scratch1 then *)
+				emit_PINSRH 1 proc.buffer (reg_of (g name)) (reg_of (g name)) (reg_of (g name)) ;
+				emit_PINSRH 2 proc.buffer (reg_of (g name)) (reg_of (g name)) (reg_of (g name)) ;
+				emit_PINSRH 3 proc.buffer (reg_of (g name)) (reg_of (g name)) (reg_of (g name))
+			) else if repet = 8 then (
+				failwith "TODO"
+			) else failwith "Bad repet count"
+			) }
+
 
 	(* Implemented Operations. *)
 
@@ -316,7 +341,7 @@ struct
 			  emitter = (fun proc g ->
 			  	emit_PMULLH proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) (reg_of (g "<1")) ;
 				if shift > 0l then
-					emit_PSRLH proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) (reg_of (g (const_name 1 shift)))) }
+					emit_PSRLH proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g (const_name 1 shift)))) }
 		| _ -> raise Not_found
 
 	let pack565 = function
@@ -337,14 +362,14 @@ struct
 			let scratch = make_unique "scratch_565" in
 			{ out_banks = [| 1 |] ;
 			  helpers =
-			  	[| make_scratch 0 scratch ;
+			  	[| make_scratch 1 scratch ;
 				   make_const 1 3l ; make_const 1 8l ;
-				   make_const 1 0b11111000l ; make_const 1 0b11111100l |] ;
+				   make_simd_const 4 0b11111000l ; make_simd_const 4 0b11111100l |] ;
 			  emitter = (fun proc g ->
 				let const_3 = const_name 1 3l
 				and const_8 = const_name 1 8l
-				and mask_RB = const_name 1 0b11111000l
-				and mask_G  = const_name 1 0b11111100l in
+				and mask_RB = simd_const_name 4 0b11111000l
+				and mask_G  = simd_const_name 4 0b11111100l in
 				emit_PAND  proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) (reg_of (g mask_RB)) ;
 				emit_PDSLL proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g const_8)) ;
 				emit_PAND  proc.buffer (reg_of (g scratch)) (reg_of (g "<1")) (reg_of (g mask_G)) ;
@@ -369,27 +394,12 @@ struct
 		(* SIMD *)
 		| 4, [| Reg (1, (16, _)) |], [| 8, Unsigned ; 8, Unsigned ; 8, Unsigned |] ->
 			{ out_banks = [| 1 ; 1 ; 1 |] ;
-			  (* FIXME: the masks should be repeated scale time, see commented code below *)
-			  helpers = [| make_const 1 3l ; make_const 1 8l ; make_const 1 0b11111000l ; make_const 1 0b11111100l |] ;
-				(*if proc.mask_RB = None then (
-					proc.mask_RB <- Some (reg_of perms.(2)) ;
-					emit_ORI   proc.buffer (reg_of (g scratch)) 0 0b11111000 ;
-					emit_DMTC1 proc.buffer (reg_of (g scratch)) proc.mask_RB ;
-					for i = 1 to 3 do
-						emit_PINSRH i proc.buffer (unopt proc.mask_RB) (unopt proc.mask_RB) (unopt proc.mask_RB)
-					done) ;
-				if proc.mask_G = None then (
-					proc.mask_G = Some (reg_of perms.(3)) ;
-					emit_ORI   proc.buffer (reg_of (g scratch)) 0 0b11111100 ;
-					emit_DMTC1 proc.buffer (reg_of (g scratch)) (unopt proc.mask_G) ;
-					for i = 1 to 3 do
-						emit_PINSRH i proc.buffer (unopt proc.mask_G) (unopt proc.mask_G) (unopt proc.mask_G)
-					done)) ;*)
+			  helpers = [| make_const 1 3l ; make_const 1 8l ; make_simd_const 4 0b11111000l ; make_simd_const 4 0b11111100l |] ;
 			emitter = (fun proc g ->
 				let const_3 = const_name 1 3l
 				and const_8 = const_name 1 8l
-				and mask_RB = const_name 1 0b11111000l
-				and mask_G  = const_name 1 0b11111100l in
+				and mask_RB = simd_const_name 4 0b11111000l
+				and mask_G  = simd_const_name 4 0b11111100l in
 				emit_PDSRL proc.buffer (reg_of (g ">0")) (reg_of (g "<0")) (reg_of (g const_8)) ; 
 				emit_PAND  proc.buffer (reg_of (g ">0")) (reg_of (g ">0")) (reg_of (g mask_RB)) ;
 				emit_PDSRL proc.buffer (reg_of (g ">1")) (reg_of (g "<0")) (reg_of (g const_3)) ;
