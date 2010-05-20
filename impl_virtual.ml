@@ -123,6 +123,7 @@ struct
 
 	let register_sizes = [| 32 ; 128 |]
 	let register_masks = Array.map (fun sz -> pred_big_int (power_int_positive_int 2 sz)) register_sizes
+	let register_name b n = Printf.sprintf "%d.%d" b n
 
 	let nb_banks = Array.length register_sets
 	let _ = assert (nb_banks = Array.length register_sizes)

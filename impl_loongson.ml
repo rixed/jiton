@@ -70,10 +70,28 @@ struct
 		| _, c -> c
 	
 	let string_of_reg_id (b, r) =
-		if b = 0 then Printf.sprintf "$%d" (reg_of (0, r))
+		if b = 1 then Printf.sprintf "$f%d" (reg_of (1, r))
 		else (
-			assert (b = 1) ;
-			Printf.sprintf "$f%d" (reg_of (1, r)))
+			assert (b = 0) ;
+			match reg_of (0, r) with
+				| 0 -> "zero"
+				| 1 -> "at"
+				| 2 -> "v0"
+				| 3 -> "v1"
+				| n when n >= 4  && n <= 11 -> Printf.sprintf "a%d" (n-4)
+				| n when n >= 12 && n <= 15 -> Printf.sprintf "t%d" (n-12)
+				| n when n >= 16 && n <= 23 -> Printf.sprintf "s%d" (n-16)
+				| 24 -> "t8"
+				| 25 -> "t9"
+				| 26 -> "k0"
+				| 27 -> "k1"
+				| 28 -> "gp"
+				| 29 -> "sp"
+				| 30 -> "s8"
+				| 31 -> "ra"
+				| _ -> failwith "No such register")
+	
+	let register_name b r = string_of_reg_id (b, r)
 
 	(* loop_descr is used to remember where a loop started and where it stops *) 
 	type loop_descr_record = { start : int ; blez : int ; top : loop_descr }
@@ -588,7 +606,7 @@ struct
 		(* Save all registers used to pass arguments on top of this frame,
 		 * so that we can later easily retrieve them. *)
 		let save_reg offset r =
-			Printf.printf "Saving register %s at offset %d\n" (string_of_reg_id r) proc.frame_size ;
+			Printf.printf "Saving register %s at offset %d\n" (string_of_reg_id r) offset ;
 			match r with
 				| 0, _ -> emit_SD proc.buffer (reg_of r) 29 offset
 				| 1, _ -> emit_SDC 1 proc.buffer (reg_of r) 29 offset

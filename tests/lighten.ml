@@ -45,7 +45,7 @@ struct
 			   address_of_bigarray alphas ;
 			   address_of_bigarray image |] ;
 		for p = 0 to nb_pixels - 1 do
-			Printf.printf "%x " image.{p} ;
+			Printf.printf "%04x " image.{p} ;
 			if (p + 1) mod 8 = 0 then Printf.printf "\n"
 		done ;
 		Printf.printf "\n"

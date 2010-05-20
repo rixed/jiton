@@ -294,8 +294,10 @@ struct
 					freelist_at_step.(symbol.death + 1) <-
 						(symbol.alloc_bank, symbol.alloc_reg) :: freelist_at_step.(symbol.death + 1) ;
 					Hashtbl.replace used_regs (symbol.alloc_bank, symbol.alloc_reg) true ;
-					Printf.printf "Using register %d.%d for %s from step %d to %d\n"
-						symbol.alloc_bank symbol.alloc_reg sym_name symbol.birth symbol.death))
+					Printf.printf "Using register %d.%d (%s) for %s from step %d to %d\n"
+						symbol.alloc_bank symbol.alloc_reg
+						(Impl.register_name symbol.alloc_bank symbol.alloc_reg)
+						sym_name symbol.birth symbol.death))
 				symbols ;
 		done ;
 

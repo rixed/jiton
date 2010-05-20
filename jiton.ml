@@ -81,6 +81,9 @@ sig
 	(* Size of the various register banks *)
 	val register_sets : int array
 
+	(* For debuging purpose, give the machine name of a register *)
+	val register_name : bank_num -> reg_num -> string
+
 	(* Returns an empty proc *)
 	val make_proc : int (* number of parameters *) -> proc
 
