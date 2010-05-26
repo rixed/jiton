@@ -447,7 +447,7 @@ struct
 		| scale, [| Reg (0, (32, Unsigned)) |], [| sz, _ |] when scale * sz = 64 ->
 			let scratch = make_unique "scratch_read" in
 			{ out_banks = [| 1 |] ;
-			  helpers = [| make_scratch 1 scratch ; clock_var |] ;
+			  helpers = [| make_scratch 0 scratch ; clock_var |] ;
 			  emitter = (fun proc g ->
 				(* Offset is (clock/scale) * 8 *)
 				if scale = 8 then
@@ -518,7 +518,7 @@ struct
 		| scale, [| Reg (0, (32, Unsigned)) ; Reg (1, (sz, _)) |], [||] when scale * sz = 64 ->
 			let scratch = make_unique "scratch_write" in
 			{ out_banks = [||] ;
-			  helpers = [| make_scratch 1 scratch ; clock_var |] ;
+			  helpers = [| make_scratch 0 scratch ; clock_var |] ;
 			  emitter = (fun proc g ->
 				(* Offset is (clock/scale) * 8 *)
 				if scale = 8 then
